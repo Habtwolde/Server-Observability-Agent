@@ -1,0 +1,73 @@
+command: ["streamlit", "run", "app.py", "--server.port", "8000", "--server.address", "0.0.0.0"]
+
+env:
+  - name: PYTHONPATH
+    value: /app/python/source_code
+
+  - name: DATABRICKS_HOST
+    value: "https://adb-4480026081424261.1.azuredatabricks.net"
+
+  - name: DATABRICKS_WAREHOUSE_ID
+    value: "47bde9279fec4222"
+
+  - name: OBS_CATALOG
+    value: ent_log_analytics
+
+  - name: OBS_SCHEMA
+    value: observability
+
+  - name: AGENT_RUNS_TABLE
+    value: agent_ingestion_runs
+
+  - name: AGENT_SERVER_REGISTRY_TABLE
+    value: agent_server_registry
+
+  - name: AGENT_SOURCE_FILES_TABLE
+    value: agent_source_files
+
+  - name: AGENT_SHEET_MANIFEST_TABLE
+    value: agent_sheet_manifest
+
+  - name: AGENT_SQL_ROWS_TABLE
+    value: agent_sql_rows_silver
+
+  - name: AGENT_SQL_METRICS_TABLE
+    value: agent_sql_metric_facts
+
+  - name: AGENT_WINDOWS_EVENTS_TABLE
+    value: agent_windows_events_silver
+
+  - name: AGENT_SERVER_INVENTORY_VIEW
+    value: v_agent_latest_server_daily_inventory
+
+  - name: AGENT_RULE_CATALOG_TABLE
+    value: agent_rule_catalog
+
+  - name: AGENT_FINDINGS_TABLE
+    value: agent_findings
+
+  - name: AGENT_CURRENT_FINDINGS_VIEW
+    value: v_agent_current_findings
+
+  - name: AGENT_TOP_FINDINGS_VIEW
+    value: v_agent_top_server_findings
+
+  - name: AGENT_HEALTH_SUMMARY_VIEW
+    value: v_agent_latest_server_health_summary
+
+  - name: AGENT_NOTIFICATION_LOG_TABLE
+    value: agent_notification_log
+
+  - name: MODEL_ENDPOINT_NAME
+    value: databricks-gpt-5-4
+
+  - name: MODEL_ENDPOINT_FALLBACK
+    value: databricks-meta-llama-3-3-70b-instruct
+
+files:
+  - app.py
+  - db/
+  - services/
+  - ui/
+  - assets/
+  - requirements.txt

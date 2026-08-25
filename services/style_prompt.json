@@ -1,0 +1,486 @@
+{
+  "report_title_template": "SQL Server Health Assessment & Remediation Plan",
+  "docx_filename_template": "{server_name}_health_assessment_report.docx",
+  "prepared_for_default": "Application Engineering and DBA Teams",
+  "prepared_on_mode": "report_generation_date",
+  "document_control": {
+    "version": "1.0",
+    "author": "",
+    "notes_template": "Initial enriched report generated from diagnostic snapshot and best-practice guidance."
+  },
+  "hard_rules": [
+    "Use ONLY the provided evidence JSON and deterministic renderer inputs. If a value is missing, explain the limitation briefly and continue the analysis without inserting placeholder phrases.",
+    "Do not mention Excel sheet names in the report body.",
+    "Do not fabricate numbers, wait types, query names, procedure names, database names, configuration values, dates, timings, owners, or operational states.",
+    "Preserve the public report structure, heading order, and table order exactly.",
+    "The cover page fields, document-control table, and Table of Contents are deterministic renderer blocks and must not be rewritten creatively.",
+    "Tables are deterministic artifacts. The LLM may interpret them, but must not invent new table schemas, new columns, or fabricated rows.",
+    "Use concise consulting-style prose: evidence-led, action-oriented, and technically cautious where evidence is partial.",
+    "Interpret metrics and findings; do not simply restate raw values without context.",
+    "Use findings language with these labels in order: Evidence, Impact, Recommendations, Validation / success criteria, Primary owners.",
+    "Where the sample report uses bullets or numbered steps, preserve that interaction pattern rather than converting everything into plain paragraphs.",
+    "The Table of Contents must never contain fallback text, narrative content, findings, or table titles.",
+    "If Introduction evidence is partial, still render a compact limitations-and-scope introduction rather than leaving the section empty.",
+    "Do not add sections, appendices, callout boxes, disclaimers, or headings that are not in the approved structure.",
+    "Do not let the LLM choose visual styling. Visual styling is controlled by the renderer and template contract.",
+    "When evidence conflicts, state the conflict explicitly and prefer cautious wording over forced conclusions.",
+    "All owner assignments must stay within these role families unless deterministic inputs say otherwise: DBA, Developer, Application Team, Infrastructure Team.",
+    "Use professional, evidence-bound consulting wording. Avoid weak hedging phrases such as may be, maybe, might, possibly, seems, and appears to be. Where evidence is incomplete, use controlled phrasing such as requires validation, is consistent with, or the snapshot evidence indicates.",
+    "Use professional, evidence-bound consulting language. Avoid weak hedge phrases such as may be, might, possibly, seems, appears, and could unless the sentence also states the exact validation method.",
+    "Enrich client-facing sections with management-grade context: risk area, evidence anchor, business impact, owner, target window, rollback or change-control note, and validation KPI where applicable.",
+    "Top risks, remediation plans, and roadmaps must read as actionable work packages, not generic observations."
+  ],
+  "report_blueprint": {
+    "fixed_section_order": [
+      "1. Introduction and Scope",
+      "2. Executive Summary",
+      "3. Environment Overview",
+      "4. Observed Performance Characteristics",
+      "5. Query and Stored Procedure Hotspots",
+      "6. Key Findings and What to Address",
+      "7. Consolidated Action Plan (DBA and Developer)",
+      "8. Developer Action Plan (Detailed)",
+      "9. DBA Action Plan (Detailed)",
+      "10. Resource Optimization and Cost Reduction Strategy",
+      "11. Expected Outcomes and KPIs",
+      "12. Conclusion",
+      "13. References",
+      "Appendix B. Recommended Follow-up Diagnostics"
+    ],
+    "expected_subsections": {
+      "7. Consolidated Action Plan (DBA and Developer)": [
+        "7.1 Implementation approach",
+        "30 / 60 / 90 Day Remediation Roadmap",
+        "Remediation Execution Plan"
+      ],
+      "8. Developer Action Plan (Detailed)": [
+        "8.1 Standards and coding principles",
+        "8.2 Procedure/query tuning checklist",
+        "8.3 Expected developer deliverables"
+      ],
+      "9. DBA Action Plan (Detailed)": [
+        "9.1 Configuration and hardening",
+        "9.2 Maintenance and integrity",
+        "9.3 Monitoring and operational playbook"
+      ],
+      "2. Executive Summary": [
+        "Executive Risk Register"
+      ],
+      "5. Query and Stored Procedure Hotspots": [
+        "Top Query Triage Cards"
+      ]
+    }
+  },
+  "toc_rules": {
+    "title": "Table of Contents",
+    "subtitle": "Sections",
+    "render_mode": "deterministic",
+    "include_only_top_level_sections": true,
+    "exclude_section_body_content": true,
+    "exclude_fallback_text": true,
+    "list_style": "bulleted",
+    "footer_note": "Note: Use Word’s References → Table of Contents to insert an automatic TOC if desired."
+  },
+  "cover_page": {
+    "title": "SQL Server Health Assessment & Remediation Plan",
+    "subtitle_lines": [
+      "Server: {server_name}",
+      "Snapshot date: {snapshot_date_display}",
+      "Prepared for: {prepared_for}",
+      "Prepared on: {prepared_on_display}"
+    ],
+    "document_control_title": "Document control",
+    "deterministic_blocks_only": true,
+    "title_case_required": true,
+    "title_should_wrap_like_sample": true,
+    "date_display_note": "Prefer a human-readable long date on the cover page if that is how the source snapshot date is displayed in the report template."
+  },
+  "visual_style_contract": {
+    "important_note": "Exact visual fidelity must be enforced in Python DOCX rendering, not delegated to the LLM. Where exact font family or RGB values cannot be read programmatically from the sample, inherit from the DOCX template first and use the fallback values below only if no template style exists.",
+    "renderer_priority": [
+      "inherit exact named styles from sample/template DOCX",
+      "apply explicit renderer style map below",
+      "use fallback values only when template styles are unavailable"
+    ],
+    "page_layout": {
+      "page_break_after_cover": true,
+      "page_break_after_toc": true,
+      "keep_toc_on_standalone_page": true,
+      "avoid_orphan_headings": true,
+      "keep_table_title_with_next_table": true,
+      "prefer_compact_spacing": true
+    },
+    "font_fallbacks": {
+      "body": "Aptos, Calibri, Arial",
+      "headings": "Aptos Display, Calibri, Arial",
+      "table": "Aptos, Calibri, Arial"
+    },
+    "fallback_palette": {
+      "title_color": "#1F1F1F",
+      "heading_color": "#1F1F1F",
+      "subheading_color": "#1F1F1F",
+      "body_color": "#1F1F1F",
+      "muted_note_color": "#5A5A5A",
+      "table_header_fill": "#D9E2F3",
+      "table_border_color": "#BFBFBF"
+    },
+    "paragraph_rules": {
+      "body_alignment": "left",
+      "headings_alignment": "left",
+      "line_spacing": 1.08,
+      "space_after_body_pt": 6,
+      "space_after_heading_pt": 6,
+      "space_before_heading_pt": 10,
+      "use_compact_bullets": true
+    },
+    "heading_styles": {
+      "report_title": {
+        "semantic_level": "title",
+        "bold": true,
+        "all_caps": false,
+        "centered": false,
+        "keep_with_next": true,
+        "color_mode": "inherit_template_or_fallback"
+      },
+      "section_heading": {
+        "semantic_level": "Heading 1",
+        "bold": true,
+        "numbered": true,
+        "keep_with_next": true,
+        "page_break_before": false,
+        "color_mode": "inherit_template_or_fallback"
+      },
+      "subsection_heading": {
+        "semantic_level": "Heading 2",
+        "bold": true,
+        "numbered": true,
+        "keep_with_next": true,
+        "color_mode": "inherit_template_or_fallback"
+      },
+      "table_title": {
+        "bold": true,
+        "italic": false,
+        "keep_with_next": true,
+        "color_mode": "inherit_template_or_fallback"
+      }
+    },
+    "table_style_rules": {
+      "style_name_preference": [
+        "Table Grid",
+        "Light Grid Accent 1",
+        "custom_sample_style"
+      ],
+      "header_row_bold": true,
+      "header_row_shading": true,
+      "show_borders": true,
+      "outer_border_weight": "single",
+      "inner_border_weight": "single",
+      "repeat_header_row": true,
+      "allow_row_break_across_pages": false,
+      "cell_padding_compact": true,
+      "vertical_alignment": "center",
+      "title_above_table": true,
+      "enrichment_tables": {
+        "Executive Risk Register": "Near-top management risk table; keep concise and evidence anchored.",
+        "Top Query Triage Cards": "Convert raw hotspot rows into action-oriented DBA/developer work packages.",
+        "30 / 60 / 90 Day Remediation Roadmap": "Executive implementation roadmap with exit criteria.",
+        "Remediation Execution Plan": "Change-control, rollback, owner, and success-measure table."
+      }
+    }
+  },
+  "severity_framework": {
+    "allowed_values": [
+      "Critical",
+      "High",
+      "Medium",
+      "Low"
+    ],
+    "selection_guidance": {
+      "Critical": "Use only for material integrity, recoverability, or severe production-stability risk supported by explicit evidence.",
+      "High": "Use for strong performance, resilience, or operational-control issues with clear evidence and business impact.",
+      "Medium": "Use for meaningful but not immediately destabilizing issues.",
+      "Low": "Use for advisory improvements or optimization opportunities that are not urgent."
+    }
+  },
+  "tables": {
+    "document_control": {
+      "title": "Document control",
+      "columns": [
+        "Version",
+        "Date",
+        "Author",
+        "Notes"
+      ]
+    },
+    "executive_key_metrics": {
+      "title": "Key metrics (latest snapshot)",
+      "columns": [
+        "Metric",
+        "Value"
+      ]
+    },
+    "platform_summary": {
+      "title": "Platform summary",
+      "columns": [
+        "Item",
+        "Value"
+      ]
+    },
+    "performance_settings": {
+      "title": "Performance-related settings",
+      "columns": [
+        "Setting",
+        "Observed value",
+        "Recommended baseline",
+        "Why it matters"
+      ]
+    },
+    "reliability_settings": {
+      "title": "Reliability and operations settings",
+      "columns": [
+        "Setting",
+        "Observed value",
+        "Recommended baseline",
+        "Why it matters"
+      ]
+    },
+    "primary_waits": {
+      "title": "Wait statistics (from snapshot)",
+      "columns": [
+        "Wait type",
+        "% of total wait time",
+        "Interpretation (high-level)"
+      ]
+    },
+    "secondary_waits": {
+      "title": "Observed wait mix (secondary view)",
+      "columns": [
+        "Wait type",
+        "% (approx.)",
+        "Interpretation"
+      ]
+    },
+    "hotspot_procedures": {
+      "title": "High-cost stored procedures / queries (from snapshot)",
+      "columns": [
+        "Procedure / Query",
+        "Primary metric",
+        "Value"
+      ]
+    },
+    "consolidated_action_plan": {
+      "title": "Consolidated Action Plan",
+      "columns": [
+        "Priority",
+        "Workstream",
+        "Action item",
+        "Owner",
+        "Effort",
+        "Target window"
+      ]
+    },
+    "rightsizing_guidance": {
+      "title": "Non-production sizing guidance (from snapshot report)",
+      "columns": [
+        "Environment",
+        "CPU",
+        "Memory"
+      ]
+    },
+    "kpi_tracking": {
+      "title": "Expected Outcomes and KPIs",
+      "columns": [
+        "KPI",
+        "How to measure",
+        "Target direction"
+      ]
+    }
+  },
+  "section_instructions": {
+    "1. Introduction and Scope": [
+      "Explain that the report expands a point-in-time SQL diagnostic snapshot into an assessment and remediation plan.",
+      "State limitations and assumptions explicitly.",
+      "Mention that waits may reflect cumulative or point-in-time evidence and should be validated through representative delta sampling where required.",
+      "Mention waits, high-cost procedures/queries, selected configuration settings, backup/integrity posture, and operational evidence.",
+      "If evidence is partial, still render a compact introduction that explains scope, limitations, and intended use.",
+      "Use the sub-label 'Limitations and assumptions:' followed by compact bullets."
+    ],
+    "2. Executive Summary": [
+      "Lead with an overall health statement in plain technical language.",
+      "Use the key metrics table.",
+      "Then provide prioritized executive-level findings as bullets.",
+      "End with immediate actions for the next 0-7 days using a numbered list.",
+      "Do not overstate urgency when raw utilization is not saturated; focus on concentrated risk areas."
+    ],
+    "3. Environment Overview": [
+      "Use the platform summary table first.",
+      "Then include a short note if diagnostic script/version alignment matters.",
+      "Then present configuration interpretation using the performance and reliability settings tables.",
+      "Call out conflicting, ambiguous, or incomplete configuration values explicitly if the evidence suggests overrides or uncertainty."
+    ],
+    "4. Observed Performance Characteristics": [
+      "Open with a short framing paragraph that explains whether raw CPU and memory utilization indicate acute exhaustion.",
+      "Use the primary waits table.",
+      "Follow with interpretation notes as bullets.",
+      "Then use the secondary wait-mix table.",
+      "Close with a caution about validating waits using delta sampling during representative load windows."
+    ],
+    "5. Query and Stored Procedure Hotspots": [
+      "Open with a short paragraph explaining why the procedures or queries are candidates for tuning.",
+      "Use the hotspot procedures table.",
+      "Then provide a repeatable numbered tuning workflow.",
+      "Keep workflow reusable and disciplined: capture plan, verify selectivity, review indexing, review memory grant/spills, validate regression risk."
+    ],
+    "6. Key Findings and What to Address": [
+      "Use a consulting-style findings structure with finding ID, severity, evidence, impact, recommendations, validation / success criteria, and primary owners.",
+      "Keep each finding compact but explicit.",
+      "Do not merge unrelated findings into one block.",
+      "Prefer 4-8 findings rather than many weak findings, unless deterministic rules explicitly produce more."
+    ],
+    "7. Consolidated Action Plan (DBA and Developer)": [
+      "Begin with one short paragraph explaining that the table converts findings into an actionable backlog.",
+      "Use the consolidated action-plan table.",
+      "Then include section 7.1 as implementation bullets.",
+      "Prioritize safety/correctness, then performance remediation, then operational maturity, then cost optimization."
+    ],
+    "8. Developer Action Plan (Detailed)": [
+      "Open with a short framing paragraph focused on reducing reads, improving estimation quality, and reducing unnecessary parallelism and TempDB pressure.",
+      "Section 8.1 should be standards / coding principles bullets.",
+      "Section 8.2 should be a numbered per-procedure tuning checklist.",
+      "Section 8.3 should be deliverables bullets."
+    ],
+    "9. DBA Action Plan (Detailed)": [
+      "Open with a short framing paragraph focused on hardening, maintenance, monitoring, and platform checks.",
+      "Section 9.1 should be configuration and hardening bullets.",
+      "Section 9.2 should be maintenance and integrity bullets.",
+      "Section 9.3 should be monitoring and operational playbook bullets."
+    ],
+    "10. Resource Optimization and Cost Reduction Strategy": [
+      "Use cautious wording.",
+      "Only suggest right-sizing when utilization evidence supports it.",
+      "Use the non-production sizing guidance table.",
+      "Then provide a short list of optimization levers to consider.",
+      "Never recommend production downsizing solely from a single snapshot."
+    ],
+    "11. Expected Outcomes and KPIs": [
+      "Open with one short sentence explaining that success should be measured objectively before and after changes.",
+      "Use the KPI tracking table."
+    ],
+    "12. Conclusion": [
+      "End with a balanced summary that prioritizes safety and correctness first, then performance remediation, then operational maturity and cost optimization."
+    ],
+    "13. References": [
+      "Use a short bullet list of named resources.",
+      "Prefer authoritative SQL Server references and operational tooling resources."
+    ],
+    "Appendix B. Recommended Follow-up Diagnostics": [
+      "Use a short bullet list of follow-up diagnostic checks and DMVs."
+    ]
+  },
+  "section_blocks": {
+    "2. Executive Summary": [
+      "overall_health_paragraph",
+      "executive_key_metrics",
+      "executive_findings_bullets",
+      "immediate_actions_numbered"
+    ],
+    "3. Environment Overview": [
+      "platform_summary",
+      "diagnostic_alignment_note",
+      "performance_settings",
+      "reliability_settings",
+      "configuration_conflict_note"
+    ],
+    "4. Observed Performance Characteristics": [
+      "framing_paragraph",
+      "primary_waits",
+      "interpretation_notes_bullets",
+      "secondary_waits",
+      "delta_wait_sampling_note"
+    ],
+    "5. Query and Stored Procedure Hotspots": [
+      "framing_paragraph",
+      "hotspot_procedures",
+      "repeatable_tuning_workflow_numbered"
+    ],
+    "7. Consolidated Action Plan (DBA and Developer)": [
+      "framing_paragraph",
+      "consolidated_action_plan",
+      "7.1 implementation approach bullets"
+    ],
+    "10. Resource Optimization and Cost Reduction Strategy": [
+      "framing_paragraph",
+      "rightsizing_guidance",
+      "optimization_levers_bullets"
+    ],
+    "11. Expected Outcomes and KPIs": [
+      "framing_paragraph",
+      "kpi_tracking"
+    ]
+  },
+  "findings_contract": {
+    "finding_id_format": "F{n}",
+    "finding_block_order": [
+      "Finding title",
+      "Severity",
+      "Evidence",
+      "Impact",
+      "Recommendations",
+      "Validation / success criteria",
+      "Primary owners"
+    ],
+    "recommendation_style": "short bullets or one compact paragraph, depending on density",
+    "owners_style": "comma-separated role families"
+  },
+  "llm_scope": {
+    "llm_should_write": [
+      "section framing paragraphs",
+      "interpretation notes",
+      "executive findings bullets",
+      "immediate actions",
+      "finding narratives",
+      "implementation guidance",
+      "developer and DBA action bullets",
+      "conclusion language",
+      "appendix bullet text"
+    ],
+    "llm_should_not_write": [
+      "cover-page field values unless already provided deterministically",
+      "document control version/date logic",
+      "table schemas",
+      "invented table rows",
+      "new headings not present in the blueprint or template",
+      "Table of Contents entries beyond the deterministic top-level section list",
+      "fallback narrative text inside the Table of Contents",
+      "visual style decisions such as font sizes, font colors, margins, or border weights"
+    ]
+  },
+  "evidence_mapping_hints": {
+    "expected_metric_domains": [
+      "server identity and snapshot metadata",
+      "platform/version information",
+      "instance configuration",
+      "database properties and integrity signals",
+      "CPU utilization history",
+      "memory utilization or grants pressure",
+      "PLE / cache pressure",
+      "top waits",
+      "TempDB contention indicators",
+      "I/O latency signals",
+      "top logical reads queries or procedures",
+      "top elapsed-time queries or procedures"
+    ],
+    "selection_guidance": [
+      "Prefer a small set of high-signal metrics over excessive table dumping.",
+      "Executive Summary should reflect the highest-risk themes, not every observed metric.",
+      "Key Findings should be derived from evidence clusters, not one isolated weak signal.",
+      "Resource Optimization should only appear as an optimization theme after safety/correctness and performance items are addressed."
+    ]
+  },
+  "sample_alignment_notes": [
+    "The public-facing heading structure mirrors the sample report cover, TOC, and numbered sections.",
+    "The sample uses a standalone cover page, standalone TOC page, compact bordered tables, short framing paragraphs, and bullets or numbered lists after evidence tables.",
+    "Subsections such as 7.1, 8.1-8.3, and 9.1-9.3 should be rendered by the template/renderer and must not disturb the top-level section order.",
+    "Visual fidelity must be implemented through DOCX styles and renderer functions rather than relying on prompt-only generation."
+  ]
+}

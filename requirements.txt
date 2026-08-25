@@ -1,0 +1,10 @@
+streamlit
+pandas
+databricks-sdk
+databricks-sql-connector
+python-docx
+lxml
+pypandoc
+pypandoc-binary
+databricks-vectorsearch
+streamlit-javascript
