@@ -51,9 +51,6 @@ TOP_FINDINGS_VIEW = _qualified(
 HEALTH_SUMMARY_VIEW = _qualified(
     "AGENT_HEALTH_SUMMARY_VIEW", "v_agent_latest_server_health_summary"
 )
-NOTIFICATION_LOG_TABLE = _qualified(
-    "AGENT_NOTIFICATION_LOG_TABLE", "agent_notification_log"
-)
 
 # db.connection imports this compatibility hook. The Agent intentionally does
 # not rewrite old Dashboard relations because their column contract differs

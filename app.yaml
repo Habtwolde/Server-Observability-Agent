@@ -58,9 +58,6 @@ env:
   - name: AGENT_HEALTH_SUMMARY_VIEW
     value: v_agent_latest_server_health_summary
 
-  - name: AGENT_NOTIFICATION_LOG_TABLE
-    value: agent_notification_log
-
   - name: MODEL_ENDPOINT_NAME
     value: databricks-gpt-5-4
 
