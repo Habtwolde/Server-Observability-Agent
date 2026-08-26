@@ -1,5 +1,4 @@
 from __future__ import annotations
-from ui.alert_subscriptions_view import render_alert_subscriptions_view
 
 import streamlit as st
 

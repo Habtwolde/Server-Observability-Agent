@@ -10,7 +10,6 @@ from db.connection import clear_query_cache, run_query
 from db.observability_sources import (
     CURRENT_FINDINGS_VIEW,
     HEALTH_SUMMARY_VIEW,
-    NOTIFICATION_LOG_TABLE,
     RUNS_TABLE,
     TOP_FINDINGS_VIEW,
 )
@@ -84,33 +83,6 @@ def load_run_history(limit: int = 20) -> pd.DataFrame:
         FROM {RUNS_TABLE}
         ORDER BY run_date DESC, updated_ts DESC
         LIMIT {safe_limit}
-        """
-    )
-
-
-@st.cache_data(ttl=60, show_spinner=False)
-def load_latest_notification() -> pd.DataFrame:
-    return run_query(
-        f"""
-        SELECT
-            notification_id,
-            run_id,
-            CAST(snapshot_date AS STRING) AS snapshot_date,
-            channel,
-            recipient,
-            minimum_severity,
-            top_issues_per_server,
-            delivery_status,
-            subject,
-            affected_server_count,
-            issue_count,
-            attempt_count,
-            sent_ts,
-            error_message,
-            updated_ts
-        FROM {NOTIFICATION_LOG_TABLE}
-        ORDER BY updated_ts DESC
-        LIMIT 1
         """
     )
 
@@ -272,7 +244,6 @@ def clear_agent_data_caches() -> None:
     for cached_function in (
         load_latest_run,
         load_run_history,
-        load_latest_notification,
         load_fleet_health,
         load_server_options,
         load_top_findings,
