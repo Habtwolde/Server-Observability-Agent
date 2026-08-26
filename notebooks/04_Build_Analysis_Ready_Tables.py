@@ -1,8 +1,4 @@
 # Databricks notebook source
-# /// script
-# [tool.databricks.environment]
-# environment_version = "5"
-# ///
 # 04_Build_Analysis_Ready_Tables
 
 from __future__ import annotations

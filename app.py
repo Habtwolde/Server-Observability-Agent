@@ -1,4 +1,5 @@
 from __future__ import annotations
+from ui.alert_subscriptions_view import render_alert_subscriptions_view
 
 import streamlit as st
 
@@ -8,12 +9,13 @@ from services.agent_findings_service import (
     load_latest_run,
     load_server_options,
 )
+
 from ui.agent_assistant_panel import render_agent_assistant_panel
 from ui.agent_styles import apply_agent_styles
+from ui.alert_subscriptions_view import render_alert_subscriptions_view
 from ui.fleet_priority_view import render_fleet_priority_view
 from ui.pipeline_status_view import render_pipeline_status_view
 from ui.server_diagnosis_view import render_server_diagnosis_view
-
 
 st.set_page_config(
     page_title="SQL Server Observability Agent",
@@ -66,18 +68,31 @@ try:
 
     render_agent_assistant_panel(selected_server, top_n=top_n)
 
-    fleet_tab, diagnosis_tab, pipeline_tab = st.tabs(
-        ["Fleet priorities", "Server diagnosis", "Pipeline status"]
+    fleet_tab, diagnosis_tab, pipeline_tab, subscriptions_tab = st.tabs(
+        [
+            "Fleet priorities",
+            "Server diagnosis",
+            "Pipeline status",
+            "Notification subscriptions",
+        ]
     )
 
     with fleet_tab:
         render_fleet_priority_view(top_n=top_n)
 
     with diagnosis_tab:
-        render_server_diagnosis_view(selected_server, top_n=top_n)
+        render_server_diagnosis_view(
+            selected_server,
+            top_n=top_n,
+        )
 
     with pipeline_tab:
         render_pipeline_status_view()
+
+    with subscriptions_tab:
+        render_alert_subscriptions_view()
+
+
 
 except DatabricksQueryError as exc:
     st.error(f"The Agent could not query Databricks: {exc}")

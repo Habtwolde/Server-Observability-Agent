@@ -21,6 +21,9 @@ env:
 
   - name: AGENT_SERVER_REGISTRY_TABLE
     value: agent_server_registry
+    
+  - name: AGENT_ALERT_SUBSCRIPTIONS_TABLE
+    value: agent_alert_subscriptions
 
   - name: AGENT_SOURCE_FILES_TABLE
     value: agent_source_files

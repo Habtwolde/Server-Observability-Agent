@@ -26,6 +26,10 @@ def _qualified(table_env: str, table_default: str) -> str:
 
 RUNS_TABLE = _qualified("AGENT_RUNS_TABLE", "agent_ingestion_runs")
 SERVER_REGISTRY_TABLE = _qualified("AGENT_SERVER_REGISTRY_TABLE", "agent_server_registry")
+ALERT_SUBSCRIPTIONS_TABLE = _qualified(
+    "AGENT_ALERT_SUBSCRIPTIONS_TABLE",
+    "agent_alert_subscriptions",
+)
 SOURCE_FILES_TABLE = _qualified("AGENT_SOURCE_FILES_TABLE", "agent_source_files")
 SHEET_MANIFEST_TABLE = _qualified("AGENT_SHEET_MANIFEST_TABLE", "agent_sheet_manifest")
 

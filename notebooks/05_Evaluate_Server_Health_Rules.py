@@ -1,8 +1,4 @@
 # Databricks notebook source
-# /// script
-# [tool.databricks.environment]
-# environment_version = "5"
-# ///
 # 05_Evaluate_Server_Health_Rules
 
 from __future__ import annotations

@@ -89,3 +89,56 @@ def run_query(query: str) -> pd.DataFrame:
     if not columns:
         return pd.DataFrame()
     return pd.DataFrame(rows, columns=columns)
+def execute_sql(statement: str) -> None:
+    """Execute a Databricks SQL write/DDL statement without result caching."""
+
+    if not statement or not str(statement).strip():
+        raise ValueError("SQL statement must not be empty.")
+
+    warehouse_id = os.getenv(
+        "DATABRICKS_WAREHOUSE_ID",
+        "",
+    ).strip()
+
+    if not warehouse_id:
+        raise DatabricksQueryError(
+            "DATABRICKS_WAREHOUSE_ID is not configured "
+            "for this application."
+        )
+
+    sql_statement = _normalize_observability_sources(
+        str(statement)
+    )
+
+    workspace = get_workspace_client()
+
+    try:
+        response = workspace.statement_execution.execute_statement(
+            warehouse_id=warehouse_id,
+            statement=sql_statement,
+            wait_timeout="30s",
+        )
+    except Exception as exc:
+        raise DatabricksQueryError(
+            "Databricks SQL write request could not be "
+            f"submitted: {exc}"
+        ) from exc
+
+    state = (
+        response.status.state
+        if response.status
+        else None
+    )
+
+    if state != dbsql.StatementState.SUCCEEDED:
+        detail = "No Databricks error detail was returned."
+
+        if (
+            response.status
+            and getattr(response.status, "error", None)
+        ):
+            detail = str(response.status.error)
+
+        raise DatabricksQueryError(
+            f"Databricks SQL statement failed. {detail}"
+        )

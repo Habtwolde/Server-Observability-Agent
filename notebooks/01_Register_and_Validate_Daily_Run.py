@@ -1,11 +1,4 @@
 # Databricks notebook source
-# /// script
-# [tool.databricks.environment]
-# environment_version = "5"
-# dependencies = [
-#   "openpyxl==3.1.5",
-# ]
-# ///
 # 01_Register_and_Validate_Daily_Run
 
 from __future__ import annotations

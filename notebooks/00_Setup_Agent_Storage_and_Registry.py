@@ -163,7 +163,36 @@ spark.sql(
     """
 )
 
+# -------------------------------------------------------------------
+# 5A. Native alert subscription routing
+# -------------------------------------------------------------------
 
+spark.sql(
+    f"""
+    CREATE TABLE IF NOT EXISTS {table_name("agent_alert_subscriptions")} (
+        subscription_id             STRING NOT NULL,
+        subscriber_email            STRING NOT NULL,
+        canonical_server_name       STRING NOT NULL,
+        notification_destination_id STRING,
+        is_active                   BOOLEAN NOT NULL,
+        notes                       STRING,
+        created_ts                  TIMESTAMP NOT NULL,
+        updated_ts                  TIMESTAMP NOT NULL
+    )
+    USING DELTA
+    COMMENT 'Maps Databricks native-alert recipients to one or more monitored SQL Servers'
+    TBLPROPERTIES (
+        'delta.enableChangeDataFeed' = 'true',
+        'quality' = 'configuration',
+        'agent.owner' = 'sql-server-observability-agent'
+    )
+    """
+)
+
+print(
+    "Alert subscription table ready: "
+    f"{CATALOG}.{SCHEMA}.agent_alert_subscriptions"
+)
 # -------------------------------------------------------------------
 # 6. Daily ingestion-run tracking
 # -------------------------------------------------------------------
@@ -432,6 +461,7 @@ spark.catalog.dropTempView("_agent_default_config")
 expected_tables = [
     "agent_config",
     "agent_server_registry",
+    "agent_alert_subscriptions",
     "agent_ingestion_runs",
     "agent_source_files",
     "agent_sheet_manifest",
