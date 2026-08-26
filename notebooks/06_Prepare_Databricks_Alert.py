@@ -1,21 +1,7 @@
 # Databricks notebook source
 from __future__ import annotations
 
-import hashlib
-import json
-import re
-from datetime import datetime, timezone
-from typing import Any
-
 from pyspark.sql import functions as F
-from pyspark.sql.types import (
-    DateType,
-    IntegerType,
-    StringType,
-    StructField,
-    StructType,
-    TimestampType,
-)
 from pyspark.sql.window import Window
 
 
@@ -48,7 +34,6 @@ CATALOG = "ent_log_analytics"
 SCHEMA = "observability"
 
 ALERT_PAYLOAD_TABLE = "agent_alert_payload"
-NOTIFICATION_LOG_TABLE = "agent_notification_log"
 
 
 def table_name(name: str) -> str:
@@ -194,56 +179,7 @@ if SUPPRESSION_REASON:
 # COMMAND ----------
 
 # -----------------------------------------------------------------------------
-# 3. Create Databricks native-alert payload table
-# -----------------------------------------------------------------------------
-
-spark.sql(
-    f"""
-    CREATE TABLE IF NOT EXISTS {table_name(ALERT_PAYLOAD_TABLE)} (
-        payload_id STRING NOT NULL,
-        run_id STRING NOT NULL,
-        snapshot_date DATE NOT NULL,
-        run_status STRING NOT NULL,
-
-        alert_eligible BOOLEAN NOT NULL,
-        suppression_reason STRING,
-
-        minimum_severity STRING NOT NULL,
-        top_issues_per_server INT NOT NULL,
-
-        canonical_server_name STRING NOT NULL,
-        health_status STRING,
-        health_score DOUBLE,
-
-        critical_issue_count INT NOT NULL,
-        high_issue_count INT NOT NULL,
-        priority_issue_count INT NOT NULL,
-
-        priority_briefing STRING NOT NULL,
-
-        prepared_ts TIMESTAMP NOT NULL
-    )
-    USING DELTA
-    COMMENT 'Run-scoped SQL Server Observability Agent payload for Databricks native alert notifications'
-    TBLPROPERTIES (
-        'delta.enableChangeDataFeed' = 'true',
-        'quality' = 'operations',
-        'agent.owner' = 'sql-server-observability-agent'
-    )
-    """
-)
-
-
-print("")
-print("Native alert payload table ready:")
-print(
-    f"{CATALOG}.{SCHEMA}.{ALERT_PAYLOAD_TABLE}"
-)
-
-# COMMAND ----------
-
-# -----------------------------------------------------------------------------
-# 4. Select and rank priority findings for the exact Agent run
+# 3. Select and rank priority findings for the exact Agent run
 # -----------------------------------------------------------------------------
 
 minimum_rank = SEVERITY_RANK[MINIMUM_SEVERITY]
@@ -333,7 +269,7 @@ display(
 # COMMAND ----------
 
 # -----------------------------------------------------------------------------
-# 5. Build one native-alert briefing row per affected server
+# 4. Build one native-alert briefing row per affected server
 # -----------------------------------------------------------------------------
 
 finding_text = F.concat(
@@ -528,7 +464,7 @@ display(
 # COMMAND ----------
 
 # -----------------------------------------------------------------------------
-# 6. Persist the run-scoped native-alert payload
+# 5 Persist the run-scoped native-alert payload
 # -----------------------------------------------------------------------------
 
 payload_to_write_df = (
@@ -676,7 +612,7 @@ display(
 # COMMAND ----------
 
 # -----------------------------------------------------------------------------
-# 7. Create the production Databricks Alert consumption view
+# 6. Create the production Databricks Alert consumption view
 # -----------------------------------------------------------------------------
 
 ALERT_VIEW = "v_agent_databricks_alert_payload"
@@ -752,6 +688,88 @@ display(
 
 # COMMAND ----------
 
+# COMMAND ----------
+
+# -----------------------------------------------------------------------------
+# 7A. Create subscriber-routed Databricks Alert view
+# -----------------------------------------------------------------------------
+
+ROUTED_ALERT_VIEW = "v_agent_databricks_alert_routes"
+
+
+spark.sql(
+    f"""
+    CREATE OR REPLACE VIEW {table_name(ROUTED_ALERT_VIEW)} AS
+
+    SELECT
+        subscriptions.subscription_id,
+        subscriptions.subscriber_email,
+        subscriptions.notification_destination_id,
+
+        payload.run_id,
+        payload.snapshot_date,
+        payload.canonical_server_name,
+        payload.health_status,
+        payload.health_score,
+        payload.critical_issue_count,
+        payload.high_issue_count,
+        payload.priority_issue_count,
+        payload.priority_briefing,
+        payload.prepared_ts
+
+    FROM {table_name(ALERT_VIEW)} AS payload
+
+    INNER JOIN {table_name("agent_alert_subscriptions")} AS subscriptions
+        ON payload.canonical_server_name =
+           subscriptions.canonical_server_name
+
+    WHERE
+        subscriptions.is_active = true
+    """
+)
+
+
+routed_alert_df = spark.table(
+    f"{CATALOG}.{SCHEMA}.{ROUTED_ALERT_VIEW}"
+)
+
+ROUTED_ALERT_ROW_COUNT = routed_alert_df.count()
+
+DISTINCT_SUBSCRIBER_COUNT = (
+    routed_alert_df
+    .select("subscriber_email")
+    .distinct()
+    .count()
+)
+
+
+print("")
+print("Subscriber-routed Databricks Alert view ready")
+print(
+    f"View: "
+    f"{CATALOG}.{SCHEMA}.{ROUTED_ALERT_VIEW}"
+)
+print(
+    f"Routed server-recipient rows: "
+    f"{ROUTED_ALERT_ROW_COUNT}"
+)
+print(
+    f"Distinct subscribers with eligible findings: "
+    f"{DISTINCT_SUBSCRIBER_COUNT}"
+)
+
+
+display(
+    routed_alert_df.orderBy(
+        "subscriber_email",
+        F.col("critical_issue_count").desc(),
+        F.col("high_issue_count").desc(),
+        "canonical_server_name",
+    )
+)
+
+# COMMAND ----------
+
 # -----------------------------------------------------------------------------
 # 8. Final validation and publish Workflow task values
 # -----------------------------------------------------------------------------
@@ -802,6 +820,8 @@ result = {
     "affected_server_count": AFFECTED_SERVER_COUNT,
     "payload_row_count": SERVER_PAYLOAD_COUNT,
     "alert_view_row_count": ALERT_VIEW_ROW_COUNT,
+    "routed_alert_row_count": ROUTED_ALERT_ROW_COUNT,
+    "distinct_subscriber_count": DISTINCT_SUBSCRIBER_COUNT,
     "suppression_reason": SUPPRESSION_REASON or "",
 }
 

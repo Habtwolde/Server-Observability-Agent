@@ -193,6 +193,52 @@ print(
     "Alert subscription table ready: "
     f"{CATALOG}.{SCHEMA}.agent_alert_subscriptions"
 )
+
+# -------------------------------------------------------------------
+# 5B. Native alert payload storage
+# -------------------------------------------------------------------
+
+spark.sql(
+    f"""
+    CREATE TABLE IF NOT EXISTS {table_name("agent_alert_payload")} (
+        payload_id STRING NOT NULL,
+        run_id STRING NOT NULL,
+        snapshot_date DATE NOT NULL,
+        run_status STRING NOT NULL,
+
+        alert_eligible BOOLEAN NOT NULL,
+        suppression_reason STRING,
+
+        minimum_severity STRING NOT NULL,
+        top_issues_per_server INT NOT NULL,
+
+        canonical_server_name STRING NOT NULL,
+        health_status STRING,
+        health_score DOUBLE,
+
+        critical_issue_count INT NOT NULL,
+        high_issue_count INT NOT NULL,
+        priority_issue_count INT NOT NULL,
+
+        priority_briefing STRING NOT NULL,
+
+        prepared_ts TIMESTAMP NOT NULL
+    )
+    USING DELTA
+    COMMENT 'Run-scoped SQL Server Observability Agent payload for Databricks native alert notifications'
+    TBLPROPERTIES (
+        'delta.enableChangeDataFeed' = 'true',
+        'quality' = 'operations',
+        'agent.owner' = 'sql-server-observability-agent'
+    )
+    """
+)
+
+print(
+    "Alert payload table ready: "
+    f"{CATALOG}.{SCHEMA}.agent_alert_payload"
+)
+
 # -------------------------------------------------------------------
 # 6. Daily ingestion-run tracking
 # -------------------------------------------------------------------
@@ -462,13 +508,13 @@ expected_tables = [
     "agent_config",
     "agent_server_registry",
     "agent_alert_subscriptions",
+    "agent_alert_payload",
     "agent_ingestion_runs",
     "agent_source_files",
     "agent_sheet_manifest",
     "agent_sql_diagnostics_bronze",
     "agent_windows_events_bronze",
 ]
-
 available_tables = {
     row.tableName
     for row in spark.sql(
