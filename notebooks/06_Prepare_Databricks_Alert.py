@@ -691,7 +691,7 @@ display(
 # COMMAND ----------
 
 # -----------------------------------------------------------------------------
-# 7A. Create subscriber-routed Databricks Alert view
+# 7. Create subscriber-routed Databricks Alert view
 # -----------------------------------------------------------------------------
 
 ROUTED_ALERT_VIEW = "v_agent_databricks_alert_routes"
