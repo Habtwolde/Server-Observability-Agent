@@ -31,14 +31,26 @@ from pyspark.sql.types import (
 # 1. Runtime parameters
 # -----------------------------------------------------------------------------
 
-dbutils.widgets.text("run_date", "", "Run date (YYYY-MM-DD; blank = today)")
-dbutils.widgets.dropdown("bootstrap_registry", "false", ["false", "true"], "Bootstrap 45-server registry")
+dbutils.widgets.text(
+    "run_date",
+    "",
+    "Run date (YYYY-MM-DD; blank = today)"
+)
+dbutils.widgets.dropdown("bootstrap_registry", "true", ["false", "true"], "Bootstrap 45-server registry")
 dbutils.widgets.dropdown("fail_on_incomplete", "false", ["false", "true"], "Fail when run is incomplete")
 dbutils.widgets.text("run_trigger", "MANUAL", "Run trigger")
+
+dbutils.widgets.dropdown(
+    "execution_mode",
+    "PRODUCTION",
+    ["PRODUCTION", "TEST"],
+    "Execution mode",
+)
 
 CATALOG = "ent_log_analytics"
 SCHEMA = "observability"
 VOLUME = "server_observability_vol"
+
 
 
 def table_name(name: str) -> str:
@@ -60,7 +72,18 @@ AGENT_ROOT = CONFIG["agent_root_path"]
 RUN_DATE_PARAMETER = dbutils.widgets.get("run_date").strip()
 BOOTSTRAP_REGISTRY = dbutils.widgets.get("bootstrap_registry").strip().lower() == "true"
 FAIL_ON_INCOMPLETE = dbutils.widgets.get("fail_on_incomplete").strip().lower() == "true"
-RUN_TRIGGER = dbutils.widgets.get("run_trigger").strip().upper() or "MANUAL"
+RUN_TRIGGER = dbutils.widgets.get("run_trigger").strip().upper() or "MANUAL_BOOTSTRAP"
+
+EXECUTION_MODE = (
+    dbutils.widgets.get("execution_mode")
+    .strip()
+    .upper()
+)
+
+if EXECUTION_MODE not in {"PRODUCTION", "TEST"}:
+    raise ValueError(
+        f"Invalid execution_mode: {EXECUTION_MODE}"
+    )
 
 source_tz = ZoneInfo(SOURCE_TIMEZONE)
 now_utc = datetime.now(timezone.utc)
@@ -75,6 +98,7 @@ print(f"Run date: {target_run_date}")
 print(f"Source timezone: {SOURCE_TIMEZONE}")
 print(f"Expected SQL workbooks: {EXPECTED_SERVER_COUNT}")
 print(f"Bootstrap registry: {BOOTSTRAP_REGISTRY}")
+print(f"Execution mode: {EXECUTION_MODE}")
 
 
 # -----------------------------------------------------------------------------
@@ -594,29 +618,55 @@ invalid_workbook_count = sum(
     and record["file_status"] != "VALIDATED"
 )
 
-if not registered_servers:
-    run_status = "REGISTRY_NOT_INITIALIZED"
-elif len(windows_files) != 1:
-    run_status = "INCOMPLETE_WINDOWS_INPUT"
-elif duplicate_servers:
-    run_status = "DUPLICATE_SERVER_INPUT"
-elif missing_servers or unexpected_servers:
-    run_status = "INCOMPLETE_SERVER_INPUT"
-elif invalid_workbook_count:
-    run_status = "INVALID_WORKBOOK_INPUT"
-elif len(identified_servers) != len(registered_servers):
-    run_status = "INCOMPLETE_SERVER_INPUT"
+if EXECUTION_MODE == "TEST":
+
+    # Controlled development mode:
+    # accept the available sample server(s) without requiring
+    # the complete 45-server production registry.
+
+    if len(sql_files) == 0:
+        run_status = "TEST_INCOMPLETE_SQL_INPUT"
+
+    elif len(windows_files) != 1:
+        run_status = "TEST_INCOMPLETE_WINDOWS_INPUT"
+
+    elif duplicate_servers:
+        run_status = "TEST_DUPLICATE_SERVER_INPUT"
+
+    elif invalid_workbook_count:
+        run_status = "TEST_INVALID_WORKBOOK_INPUT"
+
+    elif len(identified_servers) == 0:
+        run_status = "TEST_INCOMPLETE_SERVER_INPUT"
+
+    else:
+        run_status = "TEST_READY_FOR_INGESTION"
+
 else:
-    run_status = "READY_FOR_INGESTION"
 
-if len(windows_files) > 1:
-    for record in file_records:
-        if record["source_type"] == "WINDOWS_EVENTS":
-            record["file_status"] = "MULTIPLE_WINDOWS_FILES"
-            record["validation_message"] = (
-                "More than one Windows Events CSV was discovered for the run date."
-            )
+    # Production mode:
+    # preserve strict 45-server validation.
 
+    if not registered_servers:
+        run_status = "REGISTRY_NOT_INITIALIZED"
+
+    elif len(windows_files) != 1:
+        run_status = "INCOMPLETE_WINDOWS_INPUT"
+
+    elif duplicate_servers:
+        run_status = "DUPLICATE_SERVER_INPUT"
+
+    elif missing_servers or unexpected_servers:
+        run_status = "INCOMPLETE_SERVER_INPUT"
+
+    elif invalid_workbook_count:
+        run_status = "INVALID_WORKBOOK_INPUT"
+
+    elif len(identified_servers) != len(registered_servers):
+        run_status = "INCOMPLETE_SERVER_INPUT"
+
+    else:
+        run_status = "READY_FOR_INGESTION"
 
 # -----------------------------------------------------------------------------
 # 8. Idempotently persist source-file observations
@@ -721,10 +771,16 @@ dbutils.fs.put(
     True,
 )
 
+READY_STATUSES = {
+    "READY_FOR_INGESTION",
+    "TEST_READY_FOR_INGESTION",
+}
+
 run_error_message = None
-if run_status != "READY_FOR_INGESTION":
+
+if run_status not in READY_STATUSES:
     run_error_message = (
-        f"Daily input validation did not reach READY_FOR_INGESTION. "
+        "Daily input validation did not reach a ready status. "
         f"Status={run_status}. Manifest={manifest_path}"
     )
 
@@ -857,5 +913,5 @@ except Exception:
 print(f"Validation completed with status: {run_status}")
 print(f"Internal manifest: {manifest_path}")
 
-if FAIL_ON_INCOMPLETE and run_status != "READY_FOR_INGESTION":
+if FAIL_ON_INCOMPLETE and run_status not in READY_STATUSES:
     raise RuntimeError(run_error_message)

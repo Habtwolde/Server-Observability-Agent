@@ -2,31 +2,24 @@
 from __future__ import annotations
 
 import json
-from typing import Any
-
-import requests
 from databricks.sdk import WorkspaceClient
+workspace_client = WorkspaceClient()
 from pyspark.sql import functions as F
 
+current_notebook_path = (
+    dbutils.notebook.entry_point
+    .getDbutils()
+    .notebook()
+    .getContext()
+    .notebookPath()
+    .get()
+)
 
-# -----------------------------------------------------------------------------
-# 1. Deployment parameters
-# -----------------------------------------------------------------------------
-#
-# Run this notebook only after notebooks 01-06 exist in the workspace folder.
-#
-# It will eventually create/update:
-#   1. The Databricks-native SQL Alert.
-#   2. The daily production Workflow that invokes that Alert.
-#
-# Keep the production schedule PAUSED until the real 45-server daily
-# source set is available and native notification delivery has been tested.
-# -----------------------------------------------------------------------------
-
+DEFAULT_NOTEBOOKS_ROOT = current_notebook_path.rsplit("/", 1)[0]
 
 dbutils.widgets.text(
     "notebooks_root",
-    "/Users/eaglesanalytica@gmail.com/Streamlit_Databricks_log_performance/Server-Observability-Agent/notebooks",
+    DEFAULT_NOTEBOOKS_ROOT,
     "Workspace notebooks folder",
 )
 
@@ -62,11 +55,20 @@ dbutils.widgets.dropdown(
     "Initial Workflow schedule state",
 )
 
-NOTEBOOKS_ROOT = (
-    dbutils.widgets.get("notebooks_root")
-    .strip()
-    .rstrip("/")
+dbutils.widgets.dropdown(
+    "execution_mode",
+    "PRODUCTION",
+    ["PRODUCTION", "TEST"],
+    "Workflow execution mode",
 )
+
+dbutils.widgets.text(
+    "test_run_date",
+    "",
+    "TEST run date (YYYY-MM-DD)",
+)
+
+NOTEBOOKS_ROOT = DEFAULT_NOTEBOOKS_ROOT
 
 JOB_NAME = dbutils.widgets.get("job_name").strip()
 
@@ -98,11 +100,44 @@ SCHEDULE_STATE = (
     .upper()
 )
 
+EXECUTION_MODE = (
+    dbutils.widgets.get("execution_mode")
+    .strip()
+    .upper()
+)
 
-if not NOTEBOOKS_ROOT.startswith("/Users/"):
+if EXECUTION_MODE not in {"PRODUCTION", "TEST"}:
+    raise ValueError(
+        f"Invalid execution_mode: {EXECUTION_MODE}"
+    )
+
+ALLOW_INCOMPLETE_PARAMETER = (
+    "true"
+    if EXECUTION_MODE == "TEST"
+    else "false"
+)
+
+TEST_RUN_DATE = (
+    dbutils.widgets.get("test_run_date")
+    .strip()
+)
+
+if EXECUTION_MODE == "TEST" and not TEST_RUN_DATE:
+    raise ValueError(
+        "test_run_date is required when "
+        "execution_mode=TEST."
+    )
+
+WORKFLOW_RUN_DATE = (
+    TEST_RUN_DATE
+    if EXECUTION_MODE == "TEST"
+    else ""
+)
+
+if not NOTEBOOKS_ROOT.startswith("/"):
     raise ValueError(
         "notebooks_root must be an absolute "
-        "/Users/... workspace path."
+        "Databricks workspace path."
     )
 
 if not JOB_NAME:
@@ -127,21 +162,16 @@ if SCHEDULE_STATE not in {
         f"Invalid schedule state: {SCHEDULE_STATE}"
     )
 
-
-NOTEBOOK_NAMES = [
-    "01_Register_and_Validate_Daily_Run",
-    "02_Ingest_SQL_Diagnostics_Workbooks",
-    "03_Ingest_Windows_Events",
-    "04_Build_Analysis_Ready_Tables",
-    "05_Evaluate_Server_Health_Rules",
-    "06_Prepare_Databricks_Alert",
-]
-
-
 print("Databricks native notification deployment")
 print(f"Workflow: {JOB_NAME}")
 print(f"Alert: {ALERT_NAME}")
 print(f"Warehouse ID: {WAREHOUSE_ID}")
+print(f"Execution mode: {EXECUTION_MODE}")
+print(f"Workspace notebooks folder: {NOTEBOOKS_ROOT}")
+print(
+    "Workflow run date: "
+    f"{WORKFLOW_RUN_DATE or 'CURRENT BUSINESS DATE'}"
+)
 
 print(
     f"Top issues per server: "
@@ -228,9 +258,6 @@ display(
 # -----------------------------------------------------------------------------
 # 3. Inspect existing Databricks notification destinations
 # -----------------------------------------------------------------------------
-
-workspace_client = WorkspaceClient()
-
 notification_destinations = []
 page_token = None
 
@@ -550,9 +577,13 @@ while True:
         query=query,
     )
 
-    existing_alerts.extend(
-        response.get("results", [])
+    page_alerts = (
+        response.get("alerts")
+        or response.get("results")
+        or []
     )
+
+    existing_alerts.extend(page_alerts)
 
     page_token = response.get("next_page_token")
 
@@ -600,7 +631,7 @@ else:
 # COMMAND ----------
 
 # -----------------------------------------------------------------------------
-# 8. Create paused subscriber-specific SQL Alerts
+# 8. Create or update paused subscriber-specific SQL Alerts
 # -----------------------------------------------------------------------------
 
 created_alerts = {}
@@ -618,14 +649,12 @@ for email, destination_id in resolved_destinations.items():
         f"{ALERT_NAME} - {email}"
     )
 
-    # Protect the SQL literal even though subscriber emails
-    # have already been normalized and validated.
+    # Protect the SQL literal.
     email_sql = email.replace("'", "''")
 
     alert_query = f"""
     SELECT
         1 AS alert_trigger,
-
         snapshot_date,
         canonical_server_name,
         health_status,
@@ -647,13 +676,80 @@ for email, destination_id in resolved_destinations.items():
     """.strip()
 
 
+    # One authoritative definition used for both
+    # CREATE and UPDATE.
+    alert_spec = {
+        "display_name": alert_display_name,
+
+        "query_text": alert_query,
+
+        "warehouse_id": WAREHOUSE_ID,
+
+        "evaluation": {
+            "source": {
+                "name": "alert_trigger",
+                "display": "alert_trigger",
+            },
+
+            "comparison_operator": "EQUAL",
+
+            "threshold": {
+                "value": {
+                    "double_value": 1.0
+                }
+            },
+
+            "empty_result_state": "OK",
+
+            "notification": {
+                "subscriptions": [
+                    {
+                        "destination_id":
+                            destination_id
+                    }
+                ],
+
+                "retrigger_seconds": 1,
+                "notify_on_ok": False,
+            },
+        },
+
+        # The Workflow evaluates the alert.
+        # Its own schedule stays disabled.
+        "schedule": {
+            "quartz_cron_schedule":
+                "0 30 11 * * ?",
+
+            "timezone_id":
+                "America/New_York",
+
+            "pause_status":
+                "PAUSED",
+        },
+
+        "custom_summary": (
+            "SQL Server Observability Agent - "
+            "Priority Findings"
+        ),
+
+        "custom_description": (
+            "<h2>SQL Server Observability Agent</h2>"
+            "<p>Priority findings for your subscribed "
+            "SQL Servers are shown below.</p>"
+            "{{QUERY_RESULT_TABLE}}"
+        ),
+    }
+
+
     existing_alert = (
         existing_agent_alerts_by_name.get(
             alert_display_name
         )
     )
 
+
     if existing_alert:
+
         alert_id = existing_alert.get("id")
 
         if not alert_id:
@@ -662,81 +758,30 @@ for email, destination_id in resolved_destinations.items():
                 "does not have an ID."
             )
 
+        workspace_client.api_client.do(
+            "PATCH",
+            f"/api/2.0/alerts/{alert_id}",
+            query={
+                "update_mask": (
+                    "display_name,"
+                    "query_text,"
+                    "warehouse_id,"
+                    "evaluation,"
+                    "schedule,"
+                    "custom_summary,"
+                    "custom_description"
+                )
+            },
+            body=alert_spec,
+        )
+
         print(
-            f"Using existing subscriber alert: "
+            "Updated existing subscriber alert: "
             f"{alert_display_name} [{alert_id}]"
         )
 
+
     else:
-
-        alert_spec = {
-            "display_name": alert_display_name,
-
-            "query_text": alert_query,
-
-            "warehouse_id": WAREHOUSE_ID,
-
-            "evaluation": {
-                "source": {
-                    "name": "alert_trigger",
-                    "display": "alert_trigger",
-                },
-
-                "comparison_operator": "EQUAL",
-
-                "threshold": {
-                    "value": {
-                        "double_value": 1.0
-                    }
-                },
-
-                # The TEST routing view is empty.
-                # Empty results therefore remain non-triggering.
-                "empty_result_state": "OK",
-
-                "notification": {
-                    "subscriptions": [
-                        {
-                            "destination_id":
-                                destination_id
-                        }
-                    ],
-
-                    # Once production is enabled, send on each
-                    # Workflow-driven evaluation that triggers.
-                    "retrigger_seconds": 1,
-
-                    "notify_on_ok": False,
-                },
-            },
-
-            # Keep the alert's own schedule paused.
-            # Later the Workflow will explicitly evaluate it
-            # after Notebook 06 completes.
-            "schedule": {
-                "quartz_cron_schedule":
-                    "0 30 11 * * ?",
-
-                "timezone_id":
-                    "America/New_York",
-
-                "pause_status":
-                    "PAUSED",
-            },
-
-            "custom_summary": (
-                "SQL Server Observability Agent - "
-                "Priority Findings"
-            ),
-
-            "custom_description": (
-                "<h2>SQL Server Observability Agent</h2>"
-                "<p>Priority findings for your subscribed "
-                "SQL Servers are shown below.</p>"
-                "{{QUERY_RESULT_TABLE}}"
-            ),
-        }
-
 
         created = workspace_client.api_client.do(
             "POST",
@@ -753,7 +798,7 @@ for email, destination_id in resolved_destinations.items():
             )
 
         print(
-            f"Created PAUSED subscriber alert: "
+            "Created PAUSED subscriber alert: "
             f"{alert_display_name} [{alert_id}]"
         )
 
@@ -1021,9 +1066,11 @@ workflow_tasks = [
             ),
             "source": "WORKSPACE",
             "base_parameters": {
+                "run_date": WORKFLOW_RUN_DATE,
                 "bootstrap_registry": "false",
                 "fail_on_incomplete": "true",
                 "run_trigger": "SCHEDULED",
+                "execution_mode": EXECUTION_MODE,
             },
         },
     },
@@ -1042,7 +1089,7 @@ workflow_tasks = [
             "source": "WORKSPACE",
             "base_parameters": {
                 "run_id": RUN_ID_REFERENCE,
-                "allow_incomplete_run": "false",
+                "allow_incomplete_run": ALLOW_INCOMPLETE_PARAMETER,
                 "force_reprocess": "false",
                 "fail_on_workbook_error": "true",
             },
@@ -1063,7 +1110,7 @@ workflow_tasks = [
             "source": "WORKSPACE",
             "base_parameters": {
                 "run_id": RUN_ID_REFERENCE,
-                "allow_incomplete_run": "false",
+                "allow_incomplete_run": ALLOW_INCOMPLETE_PARAMETER,
                 "force_reprocess": "false",
             },
         },
@@ -1083,7 +1130,7 @@ workflow_tasks = [
             "source": "WORKSPACE",
             "base_parameters": {
                 "run_id": RUN_ID_REFERENCE,
-                "allow_incomplete_run": "false",
+                "allow_incomplete_run": ALLOW_INCOMPLETE_PARAMETER,
             },
         },
     },
@@ -1102,7 +1149,7 @@ workflow_tasks = [
             "source": "WORKSPACE",
             "base_parameters": {
                 "run_id": RUN_ID_REFERENCE,
-                "allow_incomplete_run": "false",
+                "allow_incomplete_run": ALLOW_INCOMPLETE_PARAMETER,
                 "top_issues_per_server": (
                     str(TOP_ISSUES_PER_SERVER)
                 ),
@@ -1410,6 +1457,76 @@ if len(alert_tasks) != len(created_alerts):
         "Subscriber alert task count does not match "
         "the configured subscriber count."
     )
+
+
+# -------------------------------------------------------------------------
+# Verify TEST / PRODUCTION task parameters
+# -------------------------------------------------------------------------
+
+tasks_by_key = {
+    task["task_key"]: task
+    for task in job_tasks
+}
+
+validate_params = (
+    tasks_by_key["validate_daily_run"]
+    ["notebook_task"]
+    .get("base_parameters", {})
+)
+
+if validate_params.get("run_date") != WORKFLOW_RUN_DATE:
+    raise RuntimeError(
+        "validate_daily_run run_date was not "
+        "persisted correctly. "
+        f"Actual={validate_params.get('run_date')!r}, "
+        f"expected={WORKFLOW_RUN_DATE!r}."
+    )
+
+if validate_params.get("execution_mode") != EXECUTION_MODE:
+    raise RuntimeError(
+        "validate_daily_run execution_mode was not "
+        "persisted correctly."
+    )
+
+
+test_aware_tasks = [
+    "ingest_sql_diagnostics",
+    "ingest_windows_events",
+    "build_analysis_tables",
+    "evaluate_health_rules",
+]
+
+for task_key in test_aware_tasks:
+
+    task_params = (
+        tasks_by_key[task_key]
+        ["notebook_task"]
+        .get("base_parameters", {})
+    )
+
+    actual_value = task_params.get(
+        "allow_incomplete_run"
+    )
+
+    if actual_value != ALLOW_INCOMPLETE_PARAMETER:
+        raise RuntimeError(
+            f"{task_key} has allow_incomplete_run="
+            f"{actual_value!r}; expected "
+            f"{ALLOW_INCOMPLETE_PARAMETER!r}."
+        )
+
+
+print("")
+print("Workflow execution parameters verified")
+print(f"Execution mode: {EXECUTION_MODE}")
+print(
+    "Workflow run date: "
+    f"{validate_params.get('run_date') or 'CURRENT BUSINESS DATE'}"
+)
+print(
+    "allow_incomplete_run: "
+    f"{ALLOW_INCOMPLETE_PARAMETER}"
+)
 
 
 print("")
