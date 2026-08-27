@@ -3,9 +3,18 @@
 #
 # Final runtime task for the SQL Server Observability Agent.
 #
-# This notebook intentionally reads the CURRENT active subscription table on
-# every daily run. A client can therefore add or remove subscribers in the
-# Streamlit app without rebuilding the production Workflow.
+# Production behavior:
+# - reads the CURRENT active subscription table on every run;
+# - sends only subscriber-specific findings for servers with complete SQL and
+#   Windows Events evidence;
+# - keeps individual Databricks SQL Alert schedules PAUSED;
+# - requires no Workflow rebuild when subscribers change.
+#
+# Controlled TEST behavior:
+# - disabled by default;
+# - must be explicitly enabled with allow_test_dispatch=true;
+# - accepts only TEST_HEALTH_RULES_EVALUATED runs;
+# - uses separate TEST-named SQL Alerts so production alerts are not modified.
 
 from __future__ import annotations
 
@@ -15,7 +24,6 @@ import time
 from datetime import datetime, timezone
 
 from databricks.sdk import WorkspaceClient
-from pyspark.sql import functions as F
 
 workspace_client = WorkspaceClient()
 
@@ -48,6 +56,13 @@ dbutils.widgets.text(
     "Maximum wait for the one-time subscriber alert run",
 )
 
+dbutils.widgets.dropdown(
+    "allow_test_dispatch",
+    "false",
+    ["false", "true"],
+    "Allow controlled TEST subscriber email dispatch",
+)
+
 CATALOG = "ent_log_analytics"
 SCHEMA = "observability"
 
@@ -57,9 +72,17 @@ ALERT_NAME = dbutils.widgets.get("alert_name").strip()
 DISPATCH_TIMEOUT_MINUTES = int(
     dbutils.widgets.get("dispatch_timeout_minutes").strip()
 )
+ALLOW_TEST_DISPATCH = (
+    dbutils.widgets.get("allow_test_dispatch").strip().lower() == "true"
+)
 
 if not RUN_ID:
     raise ValueError("run_id is required.")
+if not re.fullmatch(r"RUN-\d{8}", RUN_ID):
+    raise ValueError(
+        "run_id must use the Agent format RUN-YYYYMMDD. "
+        f"Received: {RUN_ID!r}"
+    )
 if not WAREHOUSE_ID:
     raise ValueError("warehouse_id is required.")
 if not ALERT_NAME:
@@ -70,21 +93,24 @@ if not 1 <= DISPATCH_TIMEOUT_MINUTES <= 120:
 ALERT_SUBSCRIPTIONS_TABLE = (
     f"`{CATALOG}`.`{SCHEMA}`.`agent_alert_subscriptions`"
 )
-ROUTED_ALERT_VIEW = (
-    f"`{CATALOG}`.`{SCHEMA}`.`v_agent_databricks_alert_routes`"
+ALERT_PAYLOAD_TABLE = (
+    f"`{CATALOG}`.`{SCHEMA}`.`agent_alert_payload`"
 )
 INVENTORY_TABLE = (
     f"`{CATALOG}`.`{SCHEMA}`.`agent_server_daily_inventory`"
 )
-RUNS_TABLE = f"`{CATALOG}`.`{SCHEMA}`.`agent_ingestion_runs`"
+RUNS_TABLE = (
+    f"`{CATALOG}`.`{SCHEMA}`.`agent_ingestion_runs`"
+)
 
 print("Dynamic subscriber notification dispatch")
 print(f"Run ID: {RUN_ID}")
 print(f"Warehouse ID: {WAREHOUSE_ID}")
+print(f"Allow TEST dispatch: {ALLOW_TEST_DISPATCH}")
 
 
 # -----------------------------------------------------------------------------
-# 2. Production run gate
+# 2. Production / controlled TEST run gate
 # -----------------------------------------------------------------------------
 
 run_rows = spark.sql(
@@ -102,11 +128,30 @@ if not run_rows:
 
 RUN_STATUS = str(run_rows[0]["run_status"])
 
-if RUN_STATUS != "HEALTH_RULES_EVALUATED":
+PRODUCTION_READY_STATUS = "HEALTH_RULES_EVALUATED"
+TEST_READY_STATUS = "TEST_HEALTH_RULES_EVALUATED"
+
+IS_TEST_RUN = RUN_STATUS == TEST_READY_STATUS
+IS_PRODUCTION_RUN = RUN_STATUS == PRODUCTION_READY_STATUS
+
+if IS_TEST_RUN and not ALLOW_TEST_DISPATCH:
     raise RuntimeError(
-        f"Run {RUN_ID} is not ready for production notification dispatch. "
+        f"Run {RUN_ID} is a TEST run. TEST email dispatch is disabled. "
+        "Set allow_test_dispatch=true only for an intentional manual test."
+    )
+
+if not IS_PRODUCTION_RUN and not (
+    IS_TEST_RUN and ALLOW_TEST_DISPATCH
+):
+    raise RuntimeError(
+        f"Run {RUN_ID} is not ready for subscriber notification dispatch. "
         f"Current status: {RUN_STATUS}."
     )
+
+DISPATCH_MODE = "TEST" if IS_TEST_RUN else "PRODUCTION"
+
+print(f"Run status: {RUN_STATUS}")
+print(f"Dispatch mode: {DISPATCH_MODE}")
 
 
 # -----------------------------------------------------------------------------
@@ -137,8 +182,14 @@ ACTIVE_ROUTE_COUNT = active_subscriptions_df.count()
 if ACTIVE_ROUTE_COUNT == 0:
     print("No active notification subscriptions. Nothing to dispatch.")
     try:
-        dbutils.jobs.taskValues.set(key="dispatch_status", value="NO_SUBSCRIBERS")
-        dbutils.jobs.taskValues.set(key="subscriber_count", value=0)
+        dbutils.jobs.taskValues.set(
+            key="dispatch_status",
+            value="NO_SUBSCRIBERS",
+        )
+        dbutils.jobs.taskValues.set(
+            key="subscriber_count",
+            value=0,
+        )
     except Exception:
         pass
     dbutils.notebook.exit("NO_SUBSCRIBERS")
@@ -156,6 +207,8 @@ subscriber_emails = [
 
 print(f"Active server-recipient routes: {ACTIVE_ROUTE_COUNT}")
 print(f"Active subscribers: {len(subscriber_emails)}")
+
+display(active_subscriptions_df)
 
 
 # -----------------------------------------------------------------------------
@@ -176,7 +229,10 @@ while True:
         query=query,
     )
 
-    notification_destinations.extend(response.get("results", []) or [])
+    notification_destinations.extend(
+        response.get("results", []) or []
+    )
+
     page_token = response.get("next_page_token")
     if not page_token:
         break
@@ -195,14 +251,20 @@ for email in subscriber_emails:
 
     if existing:
         destination_id = existing.get("id")
-        destination_type = str(existing.get("destination_type", "")).upper()
+        destination_type = str(
+            existing.get("destination_type", "")
+        ).upper()
 
         if destination_type != "EMAIL" or not destination_id:
             raise RuntimeError(
-                f"Existing notification destination {display_name!r} is invalid."
+                f"Existing notification destination {display_name!r} "
+                "is invalid."
             )
 
-        print(f"Using destination: {display_name} [{destination_id}]")
+        print(
+            f"Using destination: {display_name} "
+            f"[{destination_id}]"
+        )
 
     else:
         spec = {
@@ -223,8 +285,8 @@ for email in subscriber_emails:
         except Exception as exc:
             raise RuntimeError(
                 "Could not automatically create the Databricks email "
-                f"notification destination for {email}. The identity running "
-                "the production Workflow must be allowed to manage workspace "
+                f"notification destination for {email}. The identity "
+                "running the Workflow must be allowed to manage workspace "
                 "notification destinations."
             ) from exc
 
@@ -234,12 +296,15 @@ for email in subscriber_emails:
                 f"Databricks returned no destination ID for {email}."
             )
 
-        print(f"Created destination: {display_name} [{destination_id}]")
+        print(
+            f"Created destination: {display_name} "
+            f"[{destination_id}]"
+        )
 
     resolved_destinations[email] = str(destination_id)
 
 
-# Persist destination IDs so the Streamlit subscription table remains auditable.
+# Persist destination IDs in the subscription table for auditability.
 destination_rows = [
     (email, destination_id)
     for email, destination_id in resolved_destinations.items()
@@ -249,7 +314,10 @@ destination_df = spark.createDataFrame(
     destination_rows,
     ["subscriber_email", "notification_destination_id"],
 )
-destination_df.createOrReplaceTempView("_agent_dynamic_destinations")
+
+destination_df.createOrReplaceTempView(
+    "_agent_dynamic_destinations"
+)
 
 spark.sql(
     f"""
@@ -258,12 +326,15 @@ spark.sql(
        ON lower(trim(target.subscriber_email)) = source.subscriber_email
     WHEN MATCHED AND target.is_active = true
     THEN UPDATE SET
-        target.notification_destination_id = source.notification_destination_id,
+        target.notification_destination_id =
+            source.notification_destination_id,
         target.updated_ts = current_timestamp()
     """
 )
 
-spark.catalog.dropTempView("_agent_dynamic_destinations")
+spark.catalog.dropTempView(
+    "_agent_dynamic_destinations"
+)
 
 
 # -----------------------------------------------------------------------------
@@ -294,10 +365,20 @@ while True:
     if not page_token:
         break
 
+# TEST alerts intentionally use a different name so a manual TEST cannot
+# overwrite the production subscriber alert definition.
+ALERT_NAME_FOR_RUN = (
+    f"{ALERT_NAME}-TEST"
+    if IS_TEST_RUN
+    else ALERT_NAME
+)
+
 existing_agent_alerts_by_name = {
     alert.get("display_name"): alert
     for alert in existing_alerts
-    if str(alert.get("display_name", "")).startswith(ALERT_NAME)
+    if str(alert.get("display_name", "")).startswith(
+        ALERT_NAME_FOR_RUN
+    )
 }
 
 
@@ -307,51 +388,65 @@ existing_agent_alerts_by_name = {
 
 resolved_alerts: dict[str, dict[str, str]] = {}
 
+# Production payload rows must have passed Notebook 06's normal production
+# eligibility gate. Controlled TEST dispatch deliberately bypasses only that
+# one payload flag, because this notebook has its own explicit TEST gate above.
+PAYLOAD_ELIGIBILITY_SQL = (
+    ""
+    if IS_TEST_RUN
+    else "AND payload.alert_eligible = true"
+)
+
 for email in subscriber_emails:
     destination_id = resolved_destinations[email]
-    alert_display_name = f"{ALERT_NAME} - {email}"
+    alert_display_name = (
+        f"{ALERT_NAME_FOR_RUN} - {email}"
+    )
     email_sql = email.replace("'", "''")
 
-    # Important production filter:
-    # a subscriber is emailed only for subscribed servers that have BOTH a
-    # valid SQL workbook and Windows Events evidence in the same Agent run.
     alert_query = f"""
     SELECT
         1 AS alert_trigger,
-        routes.snapshot_date,
-        routes.canonical_server_name,
+        payload.snapshot_date,
+        payload.canonical_server_name,
 
         CASE
-            WHEN upper(routes.health_status) = 'CRITICAL'
-                THEN concat('🔴 ', routes.health_status)
-            WHEN upper(routes.health_status) = 'HIGH'
-                THEN concat('🟠 ', routes.health_status)
-            WHEN upper(routes.health_status) = 'DATA_INCOMPLETE'
-                THEN concat('🟡 ', routes.health_status)
-            WHEN upper(routes.health_status) IN ('HEALTHY', 'OK')
-                THEN concat('🟢 ', routes.health_status)
-            ELSE routes.health_status
+            WHEN upper(payload.health_status) = 'CRITICAL'
+                THEN concat('🔴 ', payload.health_status)
+            WHEN upper(payload.health_status) = 'HIGH'
+                THEN concat('🟠 ', payload.health_status)
+            WHEN upper(payload.health_status) = 'DATA_INCOMPLETE'
+                THEN concat('🟡 ', payload.health_status)
+            WHEN upper(payload.health_status) IN ('HEALTHY', 'OK')
+                THEN concat('🟢 ', payload.health_status)
+            ELSE payload.health_status
         END AS health_status_display,
 
         CASE
-            WHEN routes.critical_issue_count > 0
-                THEN concat('🔴 ', CAST(routes.critical_issue_count AS STRING))
-            ELSE CAST(routes.critical_issue_count AS STRING)
+            WHEN payload.critical_issue_count > 0
+                THEN concat(
+                    '🔴 ',
+                    CAST(payload.critical_issue_count AS STRING)
+                )
+            ELSE CAST(payload.critical_issue_count AS STRING)
         END AS critical_issue_count_display,
 
         CASE
-            WHEN routes.high_issue_count > 0
-                THEN concat('🟠 ', CAST(routes.high_issue_count AS STRING))
-            ELSE CAST(routes.high_issue_count AS STRING)
+            WHEN payload.high_issue_count > 0
+                THEN concat(
+                    '🟠 ',
+                    CAST(payload.high_issue_count AS STRING)
+                )
+            ELSE CAST(payload.high_issue_count AS STRING)
         END AS high_issue_count_display,
 
-        CAST(routes.priority_issue_count AS STRING)
+        CAST(payload.priority_issue_count AS STRING)
             AS priority_issue_count_display,
 
         replace(
             replace(
                 replace(
-                    routes.priority_briefing,
+                    payload.priority_briefing,
                     '\\n',
                     '<br>'
                 ),
@@ -362,20 +457,29 @@ for email in subscriber_emails:
             '🟠 [HIGH]'
         ) AS priority_briefing_display
 
-    FROM {ROUTED_ALERT_VIEW} AS routes
+    FROM {ALERT_PAYLOAD_TABLE} AS payload
+
+    INNER JOIN {ALERT_SUBSCRIPTIONS_TABLE} AS subscriptions
+        ON upper(trim(subscriptions.canonical_server_name)) =
+           upper(trim(payload.canonical_server_name))
 
     INNER JOIN {INVENTORY_TABLE} AS inventory
-        ON inventory.run_id = routes.run_id
-       AND inventory.canonical_server_name = routes.canonical_server_name
+        ON inventory.run_id = payload.run_id
+       AND inventory.canonical_server_name =
+           payload.canonical_server_name
 
-    WHERE routes.run_id = '{RUN_ID}'
-      AND lower(trim(routes.subscriber_email)) = '{email_sql}'
+    WHERE payload.run_id = '{RUN_ID}'
+      AND payload.priority_issue_count > 0
+      {PAYLOAD_ELIGIBILITY_SQL}
+      AND subscriptions.is_active = true
+      AND lower(trim(subscriptions.subscriber_email)) =
+          '{email_sql}'
       AND inventory.inventory_status = 'COMPLETE'
 
     ORDER BY
-        routes.critical_issue_count DESC,
-        routes.high_issue_count DESC,
-        routes.canonical_server_name
+        payload.critical_issue_count DESC,
+        payload.high_issue_count DESC,
+        payload.canonical_server_name
     """.strip()
 
     alert_spec = {
@@ -396,42 +500,53 @@ for email in subscriber_emails:
             "empty_result_state": "OK",
             "notification": {
                 "subscriptions": [
-                    {"destination_id": destination_id}
+                    {
+                        "destination_id": destination_id
+                    }
                 ],
                 "retrigger_seconds": 1,
                 "notify_on_ok": False,
             },
         },
-        # The underlying alert never runs on its own. The daily Workflow
-        # dispatch task evaluates it after the Agent analysis is complete.
+        # Individual alerts never run independently. They are evaluated by
+        # this runtime dispatch notebook after the Agent analysis is complete.
         "schedule": {
             "quartz_cron_schedule": "0 30 11 * * ?",
             "timezone_id": "America/New_York",
             "pause_status": "PAUSED",
         },
         "custom_summary": (
-            "SQL Server Observability Agent - Priority Findings"
+            "[TEST] SQL Server Observability Agent - Priority Findings"
+            if IS_TEST_RUN
+            else "SQL Server Observability Agent - Priority Findings"
         ),
         "custom_description": (
-            "<h2>SQL Server Observability Agent</h2>"
-            "<p>Priority findings requiring attention are shown below.</p>"
-            "{{#QUERY_RESULT_ROWS}}"
-            "<hr>"
-            "<h3>{{canonical_server_name}}</h3>"
-            "<p>"
-            "<b>Snapshot date:</b> {{snapshot_date}}<br>"
-            "<b>Health status:</b> {{health_status_display}}<br>"
-            "<b>Critical issues:</b> {{critical_issue_count_display}}<br>"
-            "<b>High issues:</b> {{high_issue_count_display}}<br>"
-            "<b>Priority findings:</b> {{priority_issue_count_display}}"
-            "</p>"
-            "<h4>Priority briefing</h4>"
-            "<div>{{priority_briefing_display}}</div>"
-            "{{/QUERY_RESULT_ROWS}}"
+            (
+                "<p><b>CONTROLLED TEST EMAIL</b></p>"
+                if IS_TEST_RUN
+                else ""
+            )
+            + "<h2>SQL Server Observability Agent</h2>"
+            + "<p>Priority findings requiring attention are shown below.</p>"
+            + "{{#QUERY_RESULT_ROWS}}"
+            + "<hr>"
+            + "<h3>{{canonical_server_name}}</h3>"
+            + "<p>"
+            + "<b>Snapshot date:</b> {{snapshot_date}}<br>"
+            + "<b>Health status:</b> {{health_status_display}}<br>"
+            + "<b>Critical issues:</b> {{critical_issue_count_display}}<br>"
+            + "<b>High issues:</b> {{high_issue_count_display}}<br>"
+            + "<b>Priority findings:</b> {{priority_issue_count_display}}"
+            + "</p>"
+            + "<h4>Priority briefing</h4>"
+            + "<div>{{priority_briefing_display}}</div>"
+            + "{{/QUERY_RESULT_ROWS}}"
         ),
     }
 
-    existing = existing_agent_alerts_by_name.get(alert_display_name)
+    existing = existing_agent_alerts_by_name.get(
+        alert_display_name
+    )
 
     if existing:
         alert_id = existing.get("id")
@@ -452,7 +567,10 @@ for email in subscriber_emails:
             body=alert_spec,
         )
 
-        print(f"Updated subscriber alert: {alert_display_name} [{alert_id}]")
+        print(
+            f"Updated subscriber alert: {alert_display_name} "
+            f"[{alert_id}]"
+        )
 
     else:
         created = workspace_client.api_client.do(
@@ -460,14 +578,17 @@ for email in subscriber_emails:
             "/api/2.0/alerts",
             body=alert_spec,
         )
-        alert_id = created.get("id")
 
+        alert_id = created.get("id")
         if not alert_id:
             raise RuntimeError(
                 f"Databricks returned no alert ID for {email}."
             )
 
-        print(f"Created subscriber alert: {alert_display_name} [{alert_id}]")
+        print(
+            f"Created subscriber alert: {alert_display_name} "
+            f"[{alert_id}]"
+        )
 
     resolved_alerts[email] = {
         "alert_id": str(alert_id),
@@ -479,9 +600,9 @@ for email in subscriber_emails:
 # 7. Submit one-time alert-evaluation tasks for CURRENT subscribers
 # -----------------------------------------------------------------------------
 
-# The saved production Workflow stays fixed. This one-time child run is built
-# from the subscription table at runtime, which is what removes the need to
-# rerun the Workflow-creation notebook whenever subscribers change.
+# The saved production Workflow stays fixed. This child run is assembled from
+# the subscription table at runtime, so subscriber changes require no Workflow
+# rebuild.
 
 def safe_task_key(email: str, index: int) -> str:
     local = re.sub(r"[^A-Za-z0-9_]", "_", email)
@@ -490,21 +611,34 @@ def safe_task_key(email: str, index: int) -> str:
 
 dispatch_tasks = []
 
-for index, email in enumerate(sorted(resolved_alerts), start=1):
+for index, email in enumerate(
+    sorted(resolved_alerts),
+    start=1,
+):
     info = resolved_alerts[email]
+
     dispatch_tasks.append(
         {
-            "task_key": safe_task_key(email, index),
+            "task_key": safe_task_key(
+                email,
+                index,
+            ),
             "alert_task": {
                 "alert_id": info["alert_id"],
                 "warehouse_id": WAREHOUSE_ID,
                 "subscribers": [
                     {
-                        "destination_id": info["destination_id"]
+                        "destination_id":
+                            info["destination_id"]
                     }
                 ],
             },
         }
+    )
+
+if not dispatch_tasks:
+    raise RuntimeError(
+        "No subscriber alert tasks were prepared."
     )
 
 submit_response = workspace_client.api_client.do(
@@ -513,6 +647,8 @@ submit_response = workspace_client.api_client.do(
     body={
         "run_name": (
             "sql-observability-subscriber-dispatch-"
+            + DISPATCH_MODE.lower()
+            + "-"
             + RUN_ID.lower()
         ),
         "tasks": dispatch_tasks,
@@ -541,7 +677,10 @@ terminal_lifecycle_states = {
     "INTERNAL_ERROR",
 }
 
-deadline = time.time() + DISPATCH_TIMEOUT_MINUTES * 60
+deadline = (
+    time.time()
+    + DISPATCH_TIMEOUT_MINUTES * 60
+)
 last_state = None
 
 while time.time() < deadline:
@@ -552,10 +691,18 @@ while time.time() < deadline:
     )
 
     state = run_detail.get("state") or {}
-    lifecycle = str(state.get("life_cycle_state") or "")
-    result_state = str(state.get("result_state") or "")
+    lifecycle = str(
+        state.get("life_cycle_state") or ""
+    )
+    result_state = str(
+        state.get("result_state") or ""
+    )
 
-    current_state = (lifecycle, result_state)
+    current_state = (
+        lifecycle,
+        result_state,
+    )
+
     if current_state != last_state:
         print(
             "Dispatch run state: "
@@ -565,17 +712,26 @@ while time.time() < deadline:
         last_state = current_state
 
     if lifecycle in terminal_lifecycle_states:
-        if lifecycle == "TERMINATED" and result_state == "SUCCESS":
+        if (
+            lifecycle == "TERMINATED"
+            and result_state == "SUCCESS"
+        ):
             break
 
-        state_message = state.get("state_message") or "No detail returned."
+        state_message = (
+            state.get("state_message")
+            or "No detail returned."
+        )
+
         raise RuntimeError(
             "Subscriber alert dispatch failed. "
-            f"life_cycle={lifecycle}; result={result_state}; "
+            f"life_cycle={lifecycle}; "
+            f"result={result_state}; "
             f"detail={state_message}"
         )
 
     time.sleep(5)
+
 else:
     raise TimeoutError(
         "Timed out waiting for subscriber alert dispatch run "
@@ -587,34 +743,56 @@ else:
 # 9. Publish runtime summary
 # -----------------------------------------------------------------------------
 
-# Count only CURRENT run/server/subscriber routes that have complete SQL +
-# Windows evidence. Alerts with no qualifying priority findings simply resolve
-# OK and do not send an email.
+PAYLOAD_COUNT_ELIGIBILITY_SQL = (
+    ""
+    if IS_TEST_RUN
+    else "AND payload.alert_eligible = true"
+)
+
 eligible_route_count = spark.sql(
     f"""
     SELECT COUNT(*) AS route_count
-    FROM {ROUTED_ALERT_VIEW} AS routes
+    FROM {ALERT_PAYLOAD_TABLE} AS payload
+
+    INNER JOIN {ALERT_SUBSCRIPTIONS_TABLE} AS subscriptions
+        ON upper(trim(subscriptions.canonical_server_name)) =
+           upper(trim(payload.canonical_server_name))
+
     INNER JOIN {INVENTORY_TABLE} AS inventory
-        ON inventory.run_id = routes.run_id
-       AND inventory.canonical_server_name = routes.canonical_server_name
-    WHERE routes.run_id = '{RUN_ID}'
+        ON inventory.run_id = payload.run_id
+       AND inventory.canonical_server_name =
+           payload.canonical_server_name
+
+    WHERE payload.run_id = '{RUN_ID}'
+      AND payload.priority_issue_count > 0
+      {PAYLOAD_COUNT_ELIGIBILITY_SQL}
+      AND subscriptions.is_active = true
       AND inventory.inventory_status = 'COMPLETE'
     """
 ).first()["route_count"]
 
 result = {
     "dispatch_status": "SUCCESS",
+    "dispatch_mode": DISPATCH_MODE,
     "run_id": RUN_ID,
+    "run_status": RUN_STATUS,
     "subscriber_count": len(subscriber_emails),
     "active_subscription_route_count": ACTIVE_ROUTE_COUNT,
-    "eligible_priority_route_count": int(eligible_route_count or 0),
+    "eligible_priority_route_count": int(
+        eligible_route_count or 0
+    ),
     "dispatch_run_id": int(DISPATCH_RUN_ID),
-    "completed_ts": datetime.now(timezone.utc).isoformat(),
+    "completed_ts": datetime.now(
+        timezone.utc
+    ).isoformat(),
 }
 
 try:
     for key, value in result.items():
-        dbutils.jobs.taskValues.set(key=key, value=value)
+        dbutils.jobs.taskValues.set(
+            key=key,
+            value=value,
+        )
 except Exception:
     pass
 
