@@ -657,12 +657,56 @@ for email, destination_id in resolved_destinations.items():
         1 AS alert_trigger,
         snapshot_date,
         canonical_server_name,
-        health_status,
-        health_score,
-        critical_issue_count,
-        high_issue_count,
-        priority_issue_count,
-        priority_briefing
+
+        CASE
+            WHEN upper(health_status) = 'CRITICAL'
+                THEN concat('🔴 ', health_status)
+            WHEN upper(health_status) = 'HIGH'
+                THEN concat('🟠 ', health_status)
+            WHEN upper(health_status) = 'DATA_INCOMPLETE'
+                THEN concat('🟡 ', health_status)
+            WHEN upper(health_status) IN ('HEALTHY', 'OK')
+                THEN concat('🟢 ', health_status)
+            ELSE health_status
+        END AS health_status_display,
+
+        CASE
+            WHEN critical_issue_count > 0
+                THEN concat(
+                    '🔴 ',
+                    CAST(critical_issue_count AS STRING)
+                )
+            ELSE CAST(critical_issue_count AS STRING)
+        END AS critical_issue_count_display,
+
+        CASE
+            WHEN high_issue_count > 0
+                THEN concat(
+                    '🟠 ',
+                    CAST(high_issue_count AS STRING)
+                )
+            ELSE CAST(high_issue_count AS STRING)
+        END AS high_issue_count_display,
+
+        CAST(priority_issue_count AS STRING)
+            AS priority_issue_count_display,
+
+        replace(
+            replace(
+                replace(
+                    priority_briefing,
+                    '\n',
+                    '<br>'
+                ),
+                '[CRITICAL]',
+                '🔴 [CRITICAL]'
+            ),
+            '[HIGH]',
+            '🟠 [HIGH]'
+        ) AS priority_briefing_display
+
+
+
 
     FROM {ROUTED_ALERT_VIEW}
 
@@ -732,12 +776,39 @@ for email, destination_id in resolved_destinations.items():
             "Priority Findings"
         ),
 
+        # "custom_description": (
+        #     "<h2>SQL Server Observability Agent</h2>"
+        #     "<p>Priority findings for your subscribed "
+        #     "SQL Servers are shown below.</p>"
+        #     "{{QUERY_RESULT_TABLE}}"
+        # ),
         "custom_description": (
             "<h2>SQL Server Observability Agent</h2>"
-            "<p>Priority findings for your subscribed "
-            "SQL Servers are shown below.</p>"
-            "{{QUERY_RESULT_TABLE}}"
+            "<p>Priority findings requiring attention are shown below.</p>"
+
+            "{{#QUERY_RESULT_ROWS}}"
+
+            "<hr>"
+
+            "<h3>{{canonical_server_name}}</h3>"
+            "<p>"
+            "<b>Snapshot date:</b> {{snapshot_date}}<br>"
+            "<b>Health status:</b> {{health_status_display}}<br>"
+            "<b>Critical issues:</b> {{critical_issue_count_display}}<br>"
+            "<b>High issues:</b> {{high_issue_count_display}}<br>"
+            "<b>Priority findings:</b> {{priority_issue_count_display}}"
+            "</p>"
+
+            "<h4>Priority briefing</h4>"
+
+            "<div>"
+            "{{priority_briefing_display}}"
+            "</div>"
+
+
+            "{{/QUERY_RESULT_ROWS}}"
         ),
+
     }
 
 

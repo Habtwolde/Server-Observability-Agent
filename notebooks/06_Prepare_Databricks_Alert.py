@@ -29,6 +29,12 @@ dbutils.widgets.dropdown(
     "Minimum severity included",
 )
 
+dbutils.widgets.dropdown(
+    "allow_test_email_delivery",
+    "false",
+    ["false", "true"],
+    "Allow TEST run email delivery",
+)
 
 CATALOG = "ent_log_analytics"
 SCHEMA = "observability"
@@ -72,6 +78,13 @@ MINIMUM_SEVERITY = (
     .upper()
 )
 
+ALLOW_TEST_EMAIL_DELIVERY = (
+    dbutils.widgets.get("allow_test_email_delivery")
+    .strip()
+    .lower()
+    == "true"
+)
+
 SEVERITY_RANK = {
     "LOW": 1,
     "MEDIUM": 2,
@@ -89,6 +102,10 @@ print("Databricks native alert preparation")
 print(f"Run ID parameter: {RUN_ID_PARAMETER or 'latest run'}")
 print(f"Minimum severity: {MINIMUM_SEVERITY}")
 print(f"Top issues per server: {TOP_ISSUES_PER_SERVER}")
+print(
+    f"Allow TEST email delivery: "
+    f"{ALLOW_TEST_EMAIL_DELIVERY}"
+)
 
 # COMMAND ----------
 
@@ -153,11 +170,17 @@ if RUN_STATUS not in SUPPORTED_RUN_STATUSES:
 
 IS_TEST_RUN = RUN_STATUS == TEST_READY_STATUS
 
-ALERT_ELIGIBLE = RUN_STATUS == PRODUCTION_READY_STATUS
+ALERT_ELIGIBLE = (
+    RUN_STATUS == PRODUCTION_READY_STATUS
+    or (
+        IS_TEST_RUN
+        and ALLOW_TEST_EMAIL_DELIVERY
+    )
+)
 
 SUPPRESSION_REASON = (
-    "TEST_RUN"
-    if IS_TEST_RUN
+    "TEST_RUN_EMAIL_DISABLED"
+    if IS_TEST_RUN and not ALLOW_TEST_EMAIL_DELIVERY
     else None
 )
 
@@ -618,45 +641,74 @@ display(
 ALERT_VIEW = "v_agent_databricks_alert_payload"
 
 
-spark.sql(
-    f"""
-    CREATE OR REPLACE VIEW {table_name(ALERT_VIEW)} AS
+if IS_TEST_RUN and ALLOW_TEST_EMAIL_DELIVERY:
 
-    WITH latest_run AS (
+    spark.sql(
+        f"""
+        CREATE OR REPLACE VIEW {table_name(ALERT_VIEW)} AS
+
         SELECT
-            run_id,
-            run_date,
-            run_status
-        FROM {table_name('agent_ingestion_runs')}
-        ORDER BY
-            run_date DESC,
-            updated_ts DESC
-        LIMIT 1
+            payload.run_id,
+            payload.snapshot_date,
+            payload.canonical_server_name,
+            payload.health_status,
+            payload.health_score,
+            payload.critical_issue_count,
+            payload.high_issue_count,
+            payload.priority_issue_count,
+            payload.priority_briefing,
+            payload.prepared_ts
+
+        FROM {table_name(ALERT_PAYLOAD_TABLE)} AS payload
+
+        WHERE
+            payload.run_id = '{RUN_ID}'
+            AND payload.alert_eligible = true
+            AND payload.priority_issue_count > 0
+        """
     )
 
-    SELECT
-        payload.run_id,
-        payload.snapshot_date,
-        payload.canonical_server_name,
-        payload.health_status,
-        payload.health_score,
-        payload.critical_issue_count,
-        payload.high_issue_count,
-        payload.priority_issue_count,
-        payload.priority_briefing,
-        payload.prepared_ts
+else:
 
-    FROM {table_name(ALERT_PAYLOAD_TABLE)} AS payload
+    spark.sql(
+        f"""
+        CREATE OR REPLACE VIEW {table_name(ALERT_VIEW)} AS
 
-    INNER JOIN latest_run
-        ON payload.run_id = latest_run.run_id
+        WITH latest_run AS (
+            SELECT
+                run_id,
+                run_date,
+                run_status
+            FROM {table_name('agent_ingestion_runs')}
+            ORDER BY
+                run_date DESC,
+                updated_ts DESC
+            LIMIT 1
+        )
 
-    WHERE
-        latest_run.run_status = 'HEALTH_RULES_EVALUATED'
-        AND payload.alert_eligible = true
-        AND payload.priority_issue_count > 0
-    """
-)
+        SELECT
+            payload.run_id,
+            payload.snapshot_date,
+            payload.canonical_server_name,
+            payload.health_status,
+            payload.health_score,
+            payload.critical_issue_count,
+            payload.high_issue_count,
+            payload.priority_issue_count,
+            payload.priority_briefing,
+            payload.prepared_ts
+
+        FROM {table_name(ALERT_PAYLOAD_TABLE)} AS payload
+
+        INNER JOIN latest_run
+            ON payload.run_id = latest_run.run_id
+
+        WHERE
+            latest_run.run_status = 'HEALTH_RULES_EVALUATED'
+            AND payload.alert_eligible = true
+            AND payload.priority_issue_count > 0
+        """
+    )
 
 
 alert_view_df = spark.table(
@@ -772,17 +824,16 @@ display(
 
 # -----------------------------------------------------------------------------
 # 8. Final validation and publish Workflow task values
-# -----------------------------------------------------------------------------
 
-# Safety contract:
-# - test runs must expose zero production-alert rows
-# - production runs with priority findings must expose exactly one row
-#   per affected server
 
-if IS_TEST_RUN and ALERT_VIEW_ROW_COUNT != 0:
+if (
+    IS_TEST_RUN
+    and not ALLOW_TEST_EMAIL_DELIVERY
+    and ALERT_VIEW_ROW_COUNT != 0
+):
     raise RuntimeError(
-        "Safety violation: a TEST run exposed rows to the "
-        "production Databricks Alert view."
+        "Safety violation: a suppressed TEST run exposed rows "
+        "to the Databricks Alert view."
     )
 
 
@@ -798,7 +849,14 @@ if (
     )
 
 
-if IS_TEST_RUN:
+if (
+    IS_TEST_RUN
+    and ALLOW_TEST_EMAIL_DELIVERY
+    and ROUTED_ALERT_ROW_COUNT > 0
+):
+    ALERT_STATUS = "READY_FOR_TEST_NOTIFICATION"
+
+elif IS_TEST_RUN:
     ALERT_STATUS = "SUPPRESSED_TEST_RUN"
 
 elif SERVER_PAYLOAD_COUNT == 0:
