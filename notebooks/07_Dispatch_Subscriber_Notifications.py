@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "5"
+# ///
 # 07_Dispatch_Subscriber_Notifications
 #
 # Final runtime task for the SQL Server Observability Agent.
@@ -34,7 +38,7 @@ workspace_client = WorkspaceClient()
 
 dbutils.widgets.text(
     "run_id",
-    "",
+    "RUN-20260825",
     "Run ID prepared by the upstream Agent tasks",
 )
 

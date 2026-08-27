@@ -1,4 +1,8 @@
 # Databricks notebook source
+# /// script
+# [tool.databricks.environment]
+# environment_version = "5"
+# ///
 # 08_Create_Daily_Automation_Job
 #
 # Initial deployment notebook only.
