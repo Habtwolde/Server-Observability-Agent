@@ -31,26 +31,19 @@ from pyspark.sql.types import (
 # 1. Runtime parameters
 # -----------------------------------------------------------------------------
 
-dbutils.widgets.text(
-    "run_date",
-    "",
-    "Run date (YYYY-MM-DD; blank = today)"
+dbutils.widgets.text("run_date", "", "Run date (YYYY-MM-DD; blank = today)")
+dbutils.widgets.dropdown(
+    "bootstrap_registry",
+    "true",
+    ["false", "true"],
+    "Synchronize discovered servers to registry",
 )
-dbutils.widgets.dropdown("bootstrap_registry", "true", ["false", "true"], "Bootstrap 45-server registry")
 dbutils.widgets.dropdown("fail_on_incomplete", "false", ["false", "true"], "Fail when run is incomplete")
 dbutils.widgets.text("run_trigger", "MANUAL", "Run trigger")
-
-dbutils.widgets.dropdown(
-    "execution_mode",
-    "PRODUCTION",
-    ["PRODUCTION", "TEST"],
-    "Execution mode",
-)
 
 CATALOG = "ent_log_analytics"
 SCHEMA = "observability"
 VOLUME = "server_observability_vol"
-
 
 
 def table_name(name: str) -> str:
@@ -62,7 +55,7 @@ config_rows = spark.table(f"{CATALOG}.{SCHEMA}.agent_config").select(
 ).collect()
 CONFIG = {row["config_key"]: row["config_value"] for row in config_rows}
 
-EXPECTED_SERVER_COUNT = int(CONFIG.get("expected_server_count", "45"))
+CONFIGURED_SERVER_COUNT = int(CONFIG.get("expected_server_count", "45"))
 SOURCE_TIMEZONE = CONFIG.get("source_timezone", "America/New_York")
 SQL_INBOX = CONFIG["sql_diagnostics_inbox_path"]
 SQL_BY_SERVER = CONFIG["sql_diagnostics_by_server_path"]
@@ -72,18 +65,7 @@ AGENT_ROOT = CONFIG["agent_root_path"]
 RUN_DATE_PARAMETER = dbutils.widgets.get("run_date").strip()
 BOOTSTRAP_REGISTRY = dbutils.widgets.get("bootstrap_registry").strip().lower() == "true"
 FAIL_ON_INCOMPLETE = dbutils.widgets.get("fail_on_incomplete").strip().lower() == "true"
-RUN_TRIGGER = dbutils.widgets.get("run_trigger").strip().upper() or "MANUAL_BOOTSTRAP"
-
-EXECUTION_MODE = (
-    dbutils.widgets.get("execution_mode")
-    .strip()
-    .upper()
-)
-
-if EXECUTION_MODE not in {"PRODUCTION", "TEST"}:
-    raise ValueError(
-        f"Invalid execution_mode: {EXECUTION_MODE}"
-    )
+RUN_TRIGGER = dbutils.widgets.get("run_trigger").strip().upper() or "MANUAL"
 
 source_tz = ZoneInfo(SOURCE_TIMEZONE)
 now_utc = datetime.now(timezone.utc)
@@ -96,9 +78,11 @@ else:
 
 print(f"Run date: {target_run_date}")
 print(f"Source timezone: {SOURCE_TIMEZONE}")
-print(f"Expected SQL workbooks: {EXPECTED_SERVER_COUNT}")
-print(f"Bootstrap registry: {BOOTSTRAP_REGISTRY}")
-print(f"Execution mode: {EXECUTION_MODE}")
+print(
+    "Configured reference server count: "
+    f"{CONFIGURED_SERVER_COUNT} (informational only)"
+)
+print("Synchronize discovered servers: automatic")
 
 
 # -----------------------------------------------------------------------------
@@ -168,8 +152,7 @@ def modification_timestamp(modification_time_ms: int) -> datetime:
 
 
 def list_current_files(folder: str, extensions: set[str]) -> tuple[list[Any], list[Any]]:
-    current_files = []
-    stale_files = []
+    eligible_files: list[tuple[Any, date]] = []
 
     for item in dbutils.fs.ls(folder):
         if item.name.endswith("/") or item.name.startswith("~$"):
@@ -180,11 +163,33 @@ def list_current_files(folder: str, extensions: set[str]) -> tuple[list[Any], li
 
         modified_utc = modification_timestamp(item.modificationTime)
         modified_local = modified_utc.astimezone(source_tz)
+        eligible_files.append((item, modified_local.date()))
 
-        if modified_local.date() == target_run_date:
-            current_files.append(item)
-        else:
-            stale_files.append(item)
+    current_files = [
+        item for item, modified_date in eligible_files
+        if modified_date == target_run_date
+    ]
+
+    # Files can arrive after their source collection date. When no file for the
+    # requested date exists, use the most recently uploaded batch for that
+    # source instead of forcing a re-upload merely to change modification time.
+    if not current_files and eligible_files:
+        latest_available_date = max(
+            modified_date for _, modified_date in eligible_files
+        )
+        current_files = [
+            item for item, modified_date in eligible_files
+            if modified_date == latest_available_date
+        ]
+        print(
+            f"No files dated {target_run_date} in {folder}; "
+            f"using latest available batch dated {latest_available_date}."
+        )
+
+    current_paths = {item.path for item in current_files}
+    stale_files = [
+        item for item, _ in eligible_files if item.path not in current_paths
+    ]
 
     return current_files, stale_files
 
@@ -301,7 +306,7 @@ def path_exists(path: str) -> bool:
 
 
 # -----------------------------------------------------------------------------
-# 3. Discover today's SQL workbooks and Windows Events file
+# 3. Discover the requested or latest available source batches
 # -----------------------------------------------------------------------------
 
 sql_files, stale_sql_files = list_current_files(
@@ -424,7 +429,9 @@ for file_info in windows_files:
 # 4. Create a deterministic run ID from the current inbox state
 # -----------------------------------------------------------------------------
 
-run_id = f"RUN-{target_run_date:%Y%m%d}"
+observation_ids = sorted(record["source_file_id"] for record in file_records)
+run_state_hash = hashlib.sha256("|".join(observation_ids).encode("utf-8")).hexdigest()
+run_id = f"RUN-{target_run_date:%Y%m%d}-{run_state_hash[:12].upper()}"
 
 for record in file_records:
     record["run_id"] = run_id
@@ -466,105 +473,111 @@ registry_rows = (
     .select("canonical_server_name")
     .collect()
 )
-registered_servers = sorted(
+previously_registered_servers = sorted(
     {
         normalize_server_name(row["canonical_server_name"])
         for row in registry_rows
     }
 )
 
-registry_was_bootstrapped = False
+newly_discovered_servers = sorted(
+    set(identified_servers) - set(previously_registered_servers)
+)
+registry_was_bootstrapped = (
+    not previously_registered_servers and bool(identified_servers)
+)
 
-if not registered_servers and BOOTSTRAP_REGISTRY:
-    bootstrap_is_valid = (
-        len(sql_files) == EXPECTED_SERVER_COUNT
-        and len(identified_servers) == EXPECTED_SERVER_COUNT
-        and not duplicate_servers
-        and len(windows_files) == 1
-        and all(
-            record["file_status"] == "VALIDATED"
-            for record in file_records
-            if record["source_type"] == "SQL_DIAGNOSTICS"
+# The fleet is dynamic. Every valid, unique workbook identity is upserted.
+# Servers absent from one run are reported but are not automatically deleted or
+# deactivated; that avoids treating a late/missing workbook as a server removal.
+if identified_servers:
+    registry_sync_rows = []
+
+    for server_name in identified_servers:
+        registry_sync_rows.append(
+            (
+                server_name,
+                server_name,
+                [server_name],
+                [],
+                True,
+                True,
+                now_utc,
+                now_utc,
+                now_utc,
+                now_utc,
+                None,
+                "Automatically synchronized from a validated daily workbook.",
+            )
         )
+
+    registry_schema = StructType(
+        [
+            StructField("server_id", StringType(), False),
+            StructField("canonical_server_name", StringType(), False),
+            StructField("workbook_server_aliases", ArrayType(StringType()), False),
+            StructField("windows_event_server_aliases", ArrayType(StringType()), False),
+            StructField("expected_daily_workbook", BooleanType(), False),
+            StructField("is_active", BooleanType(), False),
+            StructField("first_seen_ts", TimestampType(), True),
+            StructField("last_seen_ts", TimestampType(), True),
+            StructField("created_ts", TimestampType(), True),
+            StructField("updated_ts", TimestampType(), True),
+            StructField("approved_by", StringType(), True),
+            StructField("notes", StringType(), True),
+        ]
     )
 
-    if not bootstrap_is_valid:
-        print(
-            "Registry bootstrap was requested, but the inbox does not contain "
-            f"exactly {EXPECTED_SERVER_COUNT} valid and unique SQL workbooks "
-            "plus one Windows Events CSV. No registry rows will be inserted."
-        )
-    else:
-        bootstrap_rows = []
+    registry_sync_df = spark.createDataFrame(registry_sync_rows, registry_schema)
+    registry_sync_df.createOrReplaceTempView("_agent_registry_sync")
 
-        for record in valid_sql_records:
-            server_name = record["canonical_server_name"]
-            bootstrap_rows.append(
-                (
-                    server_name,
-                    server_name,
-                    [record["workbook_reported_server"]],
-                    [],
-                    True,
-                    True,
-                    now_utc,
-                    now_utc,
-                    now_utc,
-                    now_utc,
-                    None,
-                    "Bootstrapped from a complete validated daily workbook set.",
-                )
-            )
+    spark.sql(
+        f"""
+        MERGE INTO {table_name('agent_server_registry')} AS target
+        USING _agent_registry_sync AS source
+           ON target.server_id = source.server_id
 
-        registry_schema = StructType(
-            [
-                StructField("server_id", StringType(), False),
-                StructField("canonical_server_name", StringType(), False),
-                StructField("workbook_server_aliases", ArrayType(StringType()), False),
-                StructField("windows_event_server_aliases", ArrayType(StringType()), False),
-                StructField("expected_daily_workbook", BooleanType(), False),
-                StructField("is_active", BooleanType(), False),
-                StructField("first_seen_ts", TimestampType(), True),
-                StructField("last_seen_ts", TimestampType(), True),
-                StructField("created_ts", TimestampType(), True),
-                StructField("updated_ts", TimestampType(), True),
-                StructField("approved_by", StringType(), True),
-                StructField("notes", StringType(), True),
-            ]
-        )
+        WHEN MATCHED THEN UPDATE SET
+            target.canonical_server_name = source.canonical_server_name,
+            target.workbook_server_aliases = array_distinct(
+                concat(target.workbook_server_aliases, source.workbook_server_aliases)
+            ),
+            target.expected_daily_workbook = true,
+            target.is_active = true,
+            target.last_seen_ts = source.last_seen_ts,
+            target.updated_ts = source.updated_ts
 
-        bootstrap_df = spark.createDataFrame(bootstrap_rows, registry_schema)
-        bootstrap_df.createOrReplaceTempView("_agent_registry_bootstrap")
+        WHEN NOT MATCHED THEN INSERT *
+        """
+    )
 
-        spark.sql(
-            f"""
-            MERGE INTO {table_name('agent_server_registry')} AS target
-            USING _agent_registry_bootstrap AS source
-               ON target.server_id = source.server_id
-            WHEN NOT MATCHED THEN INSERT *
-            """
-        )
+    spark.catalog.dropTempView("_agent_registry_sync")
 
-        spark.catalog.dropTempView("_agent_registry_bootstrap")
-        registered_servers = identified_servers
-        registry_was_bootstrapped = True
+registry_rows_after_sync = (
+    spark.table(f"{CATALOG}.{SCHEMA}.agent_server_registry")
+    .where("is_active = true AND expected_daily_workbook = true")
+    .select("canonical_server_name")
+    .collect()
+)
+registered_servers = sorted(
+    {
+        normalize_server_name(row["canonical_server_name"])
+        for row in registry_rows_after_sync
+    }
+)
 
 expected_server_set = set(registered_servers)
 identified_server_set = set(identified_servers)
 
 if registered_servers:
     missing_servers = sorted(expected_server_set - identified_server_set)
-    unexpected_servers = sorted(identified_server_set - expected_server_set)
+    unexpected_servers = newly_discovered_servers
 else:
     missing_servers = []
     unexpected_servers = []
 
-for record in valid_sql_records:
-    if registered_servers and record["canonical_server_name"] in unexpected_servers:
-        record["file_status"] = "UNEXPECTED_SERVER"
-        record["validation_message"] = (
-            "Workbook server is not in the active Agent server registry."
-        )
+# Newly discovered servers are valid and have already been added to the
+# registry. They remain informational in the run manifest.
 
 
 # -----------------------------------------------------------------------------
@@ -618,55 +631,25 @@ invalid_workbook_count = sum(
     and record["file_status"] != "VALIDATED"
 )
 
-if EXECUTION_MODE == "TEST":
-
-    # Controlled development mode:
-    # accept the available sample server(s) without requiring
-    # the complete 45-server production registry.
-
-    if len(sql_files) == 0:
-        run_status = "TEST_INCOMPLETE_SQL_INPUT"
-
-    elif len(windows_files) != 1:
-        run_status = "TEST_INCOMPLETE_WINDOWS_INPUT"
-
-    elif duplicate_servers:
-        run_status = "TEST_DUPLICATE_SERVER_INPUT"
-
-    elif invalid_workbook_count:
-        run_status = "TEST_INVALID_WORKBOOK_INPUT"
-
-    elif len(identified_servers) == 0:
-        run_status = "TEST_INCOMPLETE_SERVER_INPUT"
-
-    else:
-        run_status = "TEST_READY_FOR_INGESTION"
-
+if not identified_servers:
+    run_status = "NO_VALID_SQL_INPUT"
+elif len(windows_files) != 1:
+    run_status = "INCOMPLETE_WINDOWS_INPUT"
+elif duplicate_servers:
+    run_status = "DUPLICATE_SERVER_INPUT"
+elif invalid_workbook_count:
+    run_status = "INVALID_WORKBOOK_INPUT"
 else:
+    run_status = "READY_FOR_INGESTION"
 
-    # Production mode:
-    # preserve strict 45-server validation.
+if len(windows_files) > 1:
+    for record in file_records:
+        if record["source_type"] == "WINDOWS_EVENTS":
+            record["file_status"] = "MULTIPLE_WINDOWS_FILES"
+            record["validation_message"] = (
+                "More than one Windows Events CSV was discovered for the run date."
+            )
 
-    if not registered_servers:
-        run_status = "REGISTRY_NOT_INITIALIZED"
-
-    elif len(windows_files) != 1:
-        run_status = "INCOMPLETE_WINDOWS_INPUT"
-
-    elif duplicate_servers:
-        run_status = "DUPLICATE_SERVER_INPUT"
-
-    elif missing_servers or unexpected_servers:
-        run_status = "INCOMPLETE_SERVER_INPUT"
-
-    elif invalid_workbook_count:
-        run_status = "INVALID_WORKBOOK_INPUT"
-
-    elif len(identified_servers) != len(registered_servers):
-        run_status = "INCOMPLETE_SERVER_INPUT"
-
-    else:
-        run_status = "READY_FOR_INGESTION"
 
 # -----------------------------------------------------------------------------
 # 8. Idempotently persist source-file observations
@@ -734,9 +717,8 @@ manifest = {
     "source_timezone": SOURCE_TIMEZONE,
     "run_trigger": RUN_TRIGGER,
     "run_status": run_status,
-    "expected_server_count": (
-        len(registered_servers) if registered_servers else EXPECTED_SERVER_COUNT
-    ),
+    "expected_server_count": len(identified_servers),
+    "active_registry_server_count": len(registered_servers),
     "discovered_workbook_count": len(sql_files),
     "identified_servers": identified_servers,
     "missing_servers": missing_servers,
@@ -771,16 +753,10 @@ dbutils.fs.put(
     True,
 )
 
-READY_STATUSES = {
-    "READY_FOR_INGESTION",
-    "TEST_READY_FOR_INGESTION",
-}
-
 run_error_message = None
-
-if run_status not in READY_STATUSES:
+if run_status != "READY_FOR_INGESTION":
     run_error_message = (
-        "Daily input validation did not reach a ready status. "
+        f"Daily input validation did not reach READY_FOR_INGESTION. "
         f"Status={run_status}. Manifest={manifest_path}"
     )
 
@@ -791,7 +767,7 @@ run_rows = [
         SOURCE_TIMEZONE,
         run_status,
         RUN_TRIGGER,
-        len(registered_servers) if registered_servers else EXPECTED_SERVER_COUNT,
+        len(identified_servers),
         len(sql_files),
         len(identified_servers),
         sum(
@@ -877,7 +853,8 @@ summary_rows = [
     ("run_id", run_id),
     ("run_date", target_run_date.isoformat()),
     ("run_status", run_status),
-    ("expected_server_count", str(len(registered_servers) or EXPECTED_SERVER_COUNT)),
+    ("current_run_server_count", str(len(identified_servers))),
+    ("active_registry_server_count", str(len(registered_servers))),
     ("discovered_workbook_count", str(len(sql_files))),
     ("identified_server_count", str(len(identified_servers))),
     ("invalid_workbook_count", str(invalid_workbook_count)),
@@ -913,5 +890,5 @@ except Exception:
 print(f"Validation completed with status: {run_status}")
 print(f"Internal manifest: {manifest_path}")
 
-if FAIL_ON_INCOMPLETE and run_status not in READY_STATUSES:
+if FAIL_ON_INCOMPLETE and run_status != "READY_FOR_INGESTION":
     raise RuntimeError(run_error_message)
